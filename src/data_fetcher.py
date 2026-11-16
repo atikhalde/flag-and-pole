@@ -1,6 +1,7 @@
 """
-Pure Daily-TF yfinance Data Fetcher.
-- Batched daily OHLCV downloads for all ~2,400 NSE equities
+Pure Daily-TF yfinance Data Fetcher (V2).
+- Batched daily OHLCV downloads for all ~2,400 NSE equities (supports period or start/end bounds)
+- Clean NIFTY 50 (^NSEI) benchmark fetcher for V2 Market Regime Guard & Relative Strength
 - Handles Yahoo Finance's NSE live-day quirk where today's `1d` row can briefly
   return NaN OHLC while Volume is populated (repairs that single day cleanly
   from a tiny 2d/15m fallback only when needed).
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, Optional
 
 import pandas as pd
 import yfinance as yf
@@ -87,15 +88,18 @@ def _repair_latest_day_if_nan(symbol: str, raw_df: pd.DataFrame, clean_df: pd.Da
 
 def fetch_daily_batch(
     symbols: Iterable[str],
-    period: str = "5mo",
+    period: str = "15mo",
     batch_size: int = 100,
     batch_sleep_sec: float = 1.0,
     max_retries: int = 2,
     repair_nan_today: bool = False,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Download daily (1d) OHLCV for a list of NSE symbols (without .NS suffix).
     Returns {symbol: clean_daily_df} with timezone-naive IST date index.
+    If `start` is supplied, downloads using start/end instead of `period`.
     """
     sym_list = list(symbols)
     results: Dict[str, pd.DataFrame] = {}
@@ -109,17 +113,24 @@ def fetch_daily_batch(
         tickers = [f"{s}.NS" for s in chunk]
         raw = None
 
+        dl_kwargs: Dict[str, object] = {
+            "tickers": tickers,
+            "interval": "1d",
+            "group_by": "ticker",
+            "auto_adjust": False,
+            "threads": True,
+            "progress": False,
+        }
+        if start:
+            dl_kwargs["start"] = start
+            if end:
+                dl_kwargs["end"] = end
+        else:
+            dl_kwargs["period"] = period
+
         for attempt in range(max_retries + 1):
             try:
-                raw = yf.download(
-                    tickers=tickers,
-                    period=period,
-                    interval="1d",
-                    group_by="ticker",
-                    auto_adjust=False,
-                    threads=True,
-                    progress=False,
-                )
+                raw = yf.download(**dl_kwargs)
                 if raw is not None and not raw.empty:
                     break
             except Exception as exc:
@@ -159,7 +170,7 @@ def fetch_daily_batch(
 
 def fetch_daily_single(
     symbol: str,
-    period: str = "5mo",
+    period: str = "15mo",
     repair_nan_today: bool = True,
 ) -> pd.DataFrame:
     """Fetch clean Daily OHLCV for a single NSE symbol (with live-day NaN repair)."""
@@ -171,3 +182,46 @@ def fetch_daily_single(
         repair_nan_today=repair_nan_today,
     )
     return data.get(symbol, pd.DataFrame())
+
+
+def fetch_nifty_benchmark(
+    ticker: str = "^NSEI",
+    period: str = "15mo",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    max_retries: int = 2,
+) -> pd.DataFrame:
+    """
+    Fetch clean Daily OHLCV for NIFTY 50 (^NSEI) used by the V2 Market Regime Guard
+    and 63-day Relative Strength scoring.
+    """
+    dl_kwargs: Dict[str, object] = {
+        "tickers": ticker,
+        "interval": "1d",
+        "auto_adjust": False,
+        "progress": False,
+    }
+    if start:
+        dl_kwargs["start"] = start
+        if end:
+            dl_kwargs["end"] = end
+    else:
+        dl_kwargs["period"] = period
+
+    for attempt in range(max_retries + 1):
+        try:
+            raw = yf.download(**dl_kwargs)
+            if raw is not None and not raw.empty:
+                sub = raw.copy()
+                if isinstance(sub.columns, pd.MultiIndex):
+                    lvl0 = sub.columns.get_level_values(0)
+                    sub.columns = lvl0 if "Close" in set(lvl0) else sub.columns.get_level_values(-1)
+                cleaned = _normalize_daily_df(sub)
+                if not cleaned.empty:
+                    return cleaned
+        except Exception as exc:
+            logger.warning("Benchmark %s download attempt %d failed: %s", ticker, attempt + 1, exc)
+            time.sleep(1.5 * (attempt + 1))
+
+    logger.warning("Could not fetch benchmark %s — proceeding without NIFTY regime data.", ticker)
+    return pd.DataFrame()

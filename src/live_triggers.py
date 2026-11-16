@@ -1,5 +1,5 @@
 """
-Stage-2 Live Market Scanner (Pure Daily Forming Candle Trigger Engine).
+Stage-2 Live Market Scanner (Pure Daily Forming Candle Trigger Engine — V2 Option A).
 Monitors every coiled <=20-day flag candidate in state/coiled_candidates.json
 using TODAY's live forming Daily candle from yfinance and fires alerts:
   1. GAP_AND_GO        - Opens above shelf ceiling without filling gap + strong RVOL
@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from src.market_hours import expected_intraday_volume_fraction, now_ist, session_elapsed_minutes
+from src.pattern_detector import compute_trade_plan
 
 
 @dataclass
@@ -48,7 +49,7 @@ class LiveTriggerEvent:
     shelf_low: float
     vah: Optional[float]
     poc: Optional[float]
-    # Full Trade Plan (Pre-Breakout Entry below BO, SL = 0.5% below flag low, TP1, TP2, TP3)
+    # Full V2 Option A Trade Plan
     breakout_level: float
     entry_price: float
     entry_zone_low: float
@@ -67,6 +68,10 @@ class LiveTriggerEvent:
     rr_to_tp2: float
     rr_to_tp3: float
     reason: str
+    sl_mode: str = "daily_close"
+    hard_stop_gtt: float = 0.0
+    hard_stop_gtt_pct: float = 9.0
+    intraday_gtt_sl: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -120,7 +125,6 @@ def evaluate_live_daily_triggers(
 
     ref_dt = as_of_dt or now_ist()
     elapsed_min = session_elapsed_minutes(ref_dt)
-    # If running after close or in historical replay with full-day bar, use 1.0
     if elapsed_min <= 0 or ref_dt.strftime("%Y-%m-%d") != session_date:
         expected_frac = 1.0
         elapsed_min = 375.0
@@ -140,26 +144,35 @@ def evaluate_live_daily_triggers(
     vah = candidate.get("vah")
     poc = candidate.get("poc")
 
-    tp_cfg = cfg.get("trade_plan", {})
-    sl_buf_pct = float(candidate.get("sl_buffer_pct", tp_cfg.get("sl_buffer_pct", 0.5)))
     bo_lvl = float(candidate.get("breakout_level", round(shelf_high, 2)))
     entry_zone_low = float(candidate.get("entry_zone_low", round(shelf_low * 1.005, 2)))
     entry_zone_high = float(candidate.get("entry_zone_high", round(shelf_high * 0.992, 2)))
     entry_price = float(candidate.get("entry_price", min(float(candidate.get("last_close", entry_zone_high)), entry_zone_high)))
     entry_bo = float(candidate.get("entry_breakout", bo_lvl))
-    # Always enforce SL = 0.5% below flag low (shelf_low)
-    stop = round(round((shelf_low * (1.0 - sl_buf_pct / 100.0)) * 20.0) / 20.0, 2)
-    if "invalidation_stop" in candidate:
-        stop = float(candidate["invalidation_stop"])
 
-    risk_ref = max(entry_price - stop, entry_price * 0.015)
-    tp1 = float(candidate.get("tp1", candidate.get("target_1_bos", round(bo_lvl * 1.03, 2))))
-    tp2 = float(candidate.get("tp2", candidate.get("target_2_ext", round(tp1 + risk_ref, 2))))
-    tp3 = float(candidate.get("tp3", round(tp2 + risk_ref, 2)))
+    # Build/preserve V2 Option A trade plan (Daily-Close SL + Hard -9% GTT + 4.5/10/18% TP)
+    plan_fallback = compute_trade_plan(
+        entry_price=entry_price,
+        shelf_low=shelf_low,
+        shelf_high=shelf_high,
+        pole_high=float(candidate.get("pole_high", shelf_high)),
+        pre_close=float(candidate.get("pre_pole_close", shelf_low)),
+        cfg=cfg,
+    )
+    sl_mode = str(candidate.get("sl_mode", plan_fallback["sl_mode"]))
+    stop = float(candidate.get("invalidation_stop", plan_fallback["invalidation_stop"]))
+    sl_buf_pct = float(candidate.get("sl_buffer_pct", plan_fallback["sl_buffer_pct"]))
+    hard_stop_gtt = float(candidate.get("hard_stop_gtt", plan_fallback["hard_stop_gtt"]))
+    intraday_gtt_sl = float(candidate.get("intraday_gtt_sl", plan_fallback["intraday_gtt_sl"]))
 
-    # Live Risk & R:R calculated cleanly from current LTP vs SL
+    tp1 = float(candidate.get("tp1", plan_fallback["tp1"]))
+    tp2 = float(candidate.get("tp2", plan_fallback["tp2"]))
+    tp3 = float(candidate.get("tp3", plan_fallback["tp3"]))
+
+    # Live Risk & R:R calculated cleanly from current LTP vs active SL
     live_risk_amt = max(live_price - stop, live_price * 0.01)
     live_risk_pct = round((live_price - stop) / live_price * 100.0, 2)
+    hard_gtt_pct = round((live_price - hard_stop_gtt) / live_price * 100.0, 2)
     tp1_pct = round((tp1 - live_price) / live_price * 100.0, 1)
     tp2_pct = round((tp2 - live_price) / live_price * 100.0, 1)
     tp3_pct = round((tp3 - live_price) / live_price * 100.0, 1)
@@ -215,6 +228,10 @@ def evaluate_live_daily_triggers(
             rr_to_tp2=rr_tp2,
             rr_to_tp3=rr_tp3,
             reason=reason,
+            sl_mode=sl_mode,
+            hard_stop_gtt=hard_stop_gtt,
+            hard_stop_gtt_pct=hard_gtt_pct,
+            intraday_gtt_sl=intraday_gtt_sl,
         )
 
     # 1. GAP_AND_GO (BOROLTD 16 Nov: Gap up near/over shelf ceiling + strong expansion)
@@ -267,7 +284,7 @@ def evaluate_live_daily_triggers(
         not events
         and elapsed_min >= 30
         and day_low <= floor_ref * (1.0 + sweep_buf)
-        and day_low >= stop * 0.995
+        and day_low >= hard_stop_gtt * 0.995
         and live_price >= day_open
         and live_price > floor_ref
         and live_price <= shelf_high * 1.005

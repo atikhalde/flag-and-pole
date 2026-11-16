@@ -1,4 +1,4 @@
-"""Rich HTML Telegram Bot Notifier with Annotated Chart Images & Retry Handling."""
+"""Rich HTML Telegram Bot Notifier with Annotated Chart Images & Retry Handling (V2 Option A)."""
 
 from __future__ import annotations
 
@@ -98,7 +98,7 @@ class TelegramNotifier:
                             timeout=30,
                         )
                     if resp.status_code == 200:
-                        time.sleep(0.4)  # Respect Telegram rate limits
+                        time.sleep(0.4)
                         sent = True
                         break
                     if resp.status_code == 429:
@@ -174,69 +174,90 @@ class TelegramNotifier:
         return False
 
     # ------------------------------------------------------------------
-    # Message Formatters
+    # V2 Message Formatters (Option A: Daily-Close SL + Hard -9% GTT)
     # ------------------------------------------------------------------
     def format_eod_digest(
         self,
         scan_date: str,
         universe_count: int,
         candidates: List[Dict[str, Any]],
+        nifty_regime: Optional[Dict[str, Any]] = None,
     ) -> str:
+        regime_line = ""
+        if nifty_regime and nifty_regime.get("available"):
+            n_ret = nifty_regime.get("ret20_pct", 0.0)
+            n_50 = "Above 50 SMA" if nifty_regime.get("above_50sma") else "Below 50 SMA"
+            regime_line = f"🟢 <b>NIFTY 50 Regime:</b> 20d {n_ret:+.1f}% ({n_50}) — OPEN\n"
+
         header = (
-            f"🎯 <b>NSE DAILY COILED PRE-BREAKOUT SCAN (≤20d Pole-Flag)</b>\n"
+            f"🎯 <b>NSE V2 FLAG-AND-POLE SCAN (≤20d | Grade A/A+)</b>\n"
             f"📅 <b>Date:</b> {html.escape(scan_date)} | 🔎 <b>Scanned:</b> {universe_count} NSE EQ stocks\n"
-            f"📦 <b>Qualified Watchlist:</b> {len(candidates)} coiled bases saved for Live Stage-2\n"
+            f"{regime_line}"
+            f"📦 <b>New High-Conviction Setups:</b> {len(candidates)} (Daily-Close SL + Hard GTT)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
         )
         if not candidates:
-            return header + "<i>No high-conviction ≤20d coiled flags met all criteria today.</i>"
+            return header + "<i>No new Grade A/A+ ≤20d coiled flags met all V2 institutional filters today.</i>"
 
         lines = [header]
         for idx, c in enumerate(candidates[:15], start=1):
             sym = html.escape(c["symbol"])
             tv = self._tv_link(c["symbol"])
-            badge = "🔥" if c["grade"] == "A+" else ("⚡" if c["grade"] == "A" else "👀")
+            badge = "🔥" if c["grade"] == "A+" else "⚡"
             entry_p = c.get("entry_price", c["last_close"])
             bo_lvl = c.get("breakout_level", c["shelf_high"])
+            gtt = c.get("hard_stop_gtt", c["invalidation_stop"])
             lines.append(
                 f"{idx}. {badge} <b><a href='{tv}'>{sym}</a></b> "
                 f"[<b>{c['grade']} • {c['total_score']:.0f}</b>] — CMP ₹{c['last_close']:.2f} (Day {c['total_pattern_days']}/20)\n"
-                f"   • Pole <b>+{c['pole_high_gain_pct']:.0f}%</b> ({c['pole_rvol']:.0f}x) | Box <b>{c['shelf_close_spread_pct']:.1f}%</b> | Dry-Up <b>{c['dryup_pct']:.0f}%</b>\n"
-                f"   • 🎯 Entry <b>₹{entry_p:.2f}</b> <i>(&lt;BO ₹{bo_lvl:.2f})</i> | SL <b>₹{c['invalidation_stop']:.2f}</b> | "
-                f"TP1 <b>₹{c['tp1']:.2f}</b> | TP2 <b>₹{c['tp2']:.2f}</b> | TP3 <b>₹{c['tp3']:.2f}</b>"
+                f"   • Pole <b>+{c['pole_high_gain_pct']:.0f}%</b> ({c['pole_rvol']:.0f}x) | Box <b>{c['shelf_wick_box_pct']:.1f}%</b> | Dry-Up <b>{c['dryup_pct']:.0f}%</b>\n"
+                f"   • 🎯 Entry <b>₹{entry_p:.2f}</b> <i>(&lt;BO ₹{bo_lvl:.2f})</i> | Close SL <b>₹{c['invalidation_stop']:.2f}</b> (GTT ₹{gtt:.2f})\n"
+                f"   • 💰 TP1 <b>₹{c['tp1']:.2f}</b> (+4.5%) | TP2 <b>₹{c['tp2']:.2f}</b> (+10%) | TP3 <b>₹{c['tp3']:.2f}</b> (+18%)"
             )
-        lines.append("\n<i>Top setups with annotated Daily Charts + Volume Profile follow below 👇</i>")
+        lines.append("\n<i>Annotated Daily Charts + Trade Plans follow below 👇</i>")
         return "\n".join(lines)
 
     def format_eod_setup_caption(self, c: Dict[str, Any]) -> str:
         sym = html.escape(c["symbol"])
-        name = html.escape(str(c.get("company_name", sym))[:32])
+        name = html.escape(str(c.get("company_name", sym))[:30])
         tv = self._tv_link(c["symbol"])
         badge = "🔥" if c["grade"] == "A+" else "⚡"
-        sl_buf = c.get("sl_buffer_pct", 0.5)
         spring_tag = " | 🟢 Spring" if c.get("has_spring_bar") else ""
+        s2_tag = " | Stage-2" if c.get("stage2_uptrend") else ""
         entry_p = c.get("entry_price", c["last_close"])
         ez_lo = c.get("entry_zone_low", c["shelf_low"])
         ez_hi = c.get("entry_zone_high", entry_p)
         bo_lvl = c.get("breakout_level", c["shelf_high"])
-        risk_pct = c.get("risk_pct", c.get("risk_pct_anticipatory", 0.0))
+        risk_pct = c.get("risk_pct", 0.0)
+        sl_mode = c.get("sl_mode", "daily_close")
+        hard_gtt = c.get("hard_stop_gtt", c["invalidation_stop"])
+        hard_gtt_pct = c.get("hard_stop_gtt_pct", 9.0)
+        intra_ref = c.get("intraday_gtt_sl", c["invalidation_stop"])
+
+        if sl_mode == "daily_close":
+            sl_lines = (
+                f"• <b>Close SL (3:20 PM):</b> ₹{c['invalidation_stop']:.2f} <i>(-{risk_pct:.1f}% | exit only if Daily Close breaks)</i>\n"
+                f"• <b>Emergency GTT:</b> ₹{hard_gtt:.2f} <i>(-{hard_gtt_pct:.1f}% broker safety net | Hands-off GTT: ₹{intra_ref:.2f})</i>\n"
+            )
+        else:
+            sl_lines = f"• <b>Stop Loss (GTT):</b> ₹{c['invalidation_stop']:.2f} <i>(-{risk_pct:.1f}%)</i>\n"
 
         return (
-            f"{badge} <b>PRE-BREAKOUT: <a href='{tv}'>{sym}</a></b> ({name})\n"
-            f"🏆 <b>Grade {c['grade']} ({c['total_score']:.1f}/100)</b> — {html.escape(c['pattern_label'])}{spring_tag}\n"
+            f"{badge} <b>V2 PRE-BREAKOUT: <a href='{tv}'>{sym}</a></b> ({name})\n"
+            f"🏆 <b>Grade {c['grade']} ({c['total_score']:.0f}/100)</b> — {html.escape(c['pattern_label'])}{spring_tag}{s2_tag}\n"
             f"⏱ <b>Day {c['total_pattern_days']}/20</b> ({c['pole_days']}d Pole +{c['pole_high_gain_pct']:.0f}% on {c['pole_rvol']:.0f}x Vol + {c['base_days']}d Flag)\n"
-            f"📊 Flag ₹{c['shelf_low']:.2f}–₹{c['shelf_high']:.2f} (Box <b>{c['shelf_close_spread_pct']:.1f}%</b> | Dry-Up <b>{c['dryup_pct']:.1f}%</b>)\n\n"
-            f"🎯 <b>FULL TRADE PLAN (Pre-Breakout Entry):</b>\n"
-            f"• <b>Entry (Below BO):</b> ₹{entry_p:.2f} <i>(Zone ₹{ez_lo:.2f}–₹{ez_hi:.2f} | BO ₹{bo_lvl:.2f})</i>\n"
-            f"• <b>Stop Loss:</b> ₹{c['invalidation_stop']:.2f} <i>(-{risk_pct:.1f}% | {sl_buf:.1f}% below flag low ₹{c['shelf_low']:.2f})</i>\n"
-            f"• <b>TP1 ({c['rr_to_tp1']:.1f}R):</b> ₹{c['tp1']:.2f} (+{c['tp1_pct']:.1f}%)\n"
-            f"• <b>TP2 ({c['rr_to_tp2']:.1f}R):</b> ₹{c['tp2']:.2f} (+{c['tp2_pct']:.1f}%)\n"
-            f"• <b>TP3 ({c['rr_to_tp3']:.1f}R):</b> ₹{c['tp3']:.2f} (+{c['tp3_pct']:.1f}% | Pole Target)"
+            f"📊 Flag ₹{c['shelf_low']:.2f}–₹{c['shelf_high']:.2f} (Dry-Up <b>{c['dryup_pct']:.0f}%</b> | 52wH {c.get('pct_from_52w_high', 0):+.0f}% | RS {c.get('rs63_vs_nifty', 0):+.0f}%)\n\n"
+            f"🎯 <b>V2 TRADE PLAN (Entry Below Breakout):</b>\n"
+            f"• <b>Entry:</b> ₹{entry_p:.2f} <i>(Zone ₹{ez_lo:.2f}–₹{ez_hi:.2f} | BO ₹{bo_lvl:.2f})</i>\n"
+            f"{sl_lines}"
+            f"• <b>TP1 (+{c['tp1_pct']:.1f}%):</b> ₹{c['tp1']:.2f} <i>(Book 45% → Move SL to Breakeven)</i>\n"
+            f"• <b>TP2 (+{c['tp2_pct']:.1f}%):</b> ₹{c['tp2']:.2f} <i>(Book 30% → Trail SL to TP1)</i>\n"
+            f"• <b>TP3 (+{c['tp3_pct']:.1f}%):</b> ₹{c['tp3']:.2f} <i>(Ride final 25% runner)</i>"
         )
 
     def format_live_trigger_caption(self, ev: Dict[str, Any]) -> str:
         sym = html.escape(ev["symbol"])
-        name = html.escape(str(ev.get("company_name", sym))[:30])
+        name = html.escape(str(ev.get("company_name", sym))[:28])
         tv = self._tv_link(ev["symbol"])
 
         icons = {
@@ -248,31 +269,41 @@ class TelegramNotifier:
         icon = icons.get(ev["trigger_type"], "🔔")
         label = ev["trigger_type"].replace("_", " ")
         chg_sign = "+" if ev["day_chg_pct"] >= 0 else ""
-        sl_buf = ev.get("sl_buffer_pct", 0.5)
         bo_lvl = ev.get("breakout_level", ev["shelf_high"])
         ez_lo = ev.get("entry_zone_low", ev["shelf_low"])
         ez_hi = ev.get("entry_zone_high", ev.get("entry_price", ev["live_price"]))
+        sl_mode = ev.get("sl_mode", "daily_close")
+        hard_gtt = ev.get("hard_stop_gtt", ev["invalidation_stop"])
+        hard_gtt_pct = ev.get("hard_stop_gtt_pct", 9.0)
+        intra_ref = ev.get("intraday_gtt_sl", ev["invalidation_stop"])
 
-        def _fmt_tp(label_tp: str, price: float, rr: float, pct: float) -> str:
+        def _fmt_tp(label_tp: str, price: float, pct: float, action: str) -> str:
             if ev["live_price"] >= price:
                 return f"• <b>{label_tp}:</b> ₹{price:.2f} <i>(✅ Already Hit)</i>"
-            return f"• <b>{label_tp} ({rr:.1f}R):</b> ₹{price:.2f} ({pct:+.1f}%)"
+            return f"• <b>{label_tp} ({pct:+.1f}%):</b> ₹{price:.2f} <i>({action})</i>"
 
         entry_line = (
             f"• <b>Entry (Below BO):</b> ₹{ev['live_price']:.2f} <i>(Zone ₹{ez_lo:.2f}–₹{ez_hi:.2f} | BO ₹{bo_lvl:.2f})</i>"
             if ev["live_price"] < bo_lvl
             else f"• <b>Entry / LTP:</b> ₹{ev['live_price']:.2f} <i>(Pre-BO Zone ₹{ez_lo:.2f}–₹{ez_hi:.2f} | BO ₹{bo_lvl:.2f})</i>"
         )
+        if sl_mode == "daily_close":
+            sl_lines = (
+                f"• <b>Close SL (3:20 PM):</b> ₹{ev['invalidation_stop']:.2f} <i>(-{ev['live_risk_pct']:.1f}% on Daily Close)</i>\n"
+                f"• <b>Emergency GTT:</b> ₹{hard_gtt:.2f} <i>(-{hard_gtt_pct:.1f}% safety | Hands-off: ₹{intra_ref:.2f})</i>\n"
+            )
+        else:
+            sl_lines = f"• <b>Stop Loss (GTT):</b> ₹{ev['invalidation_stop']:.2f} <i>(-{ev['live_risk_pct']:.1f}%)</i>\n"
 
         return (
             f"{icon} <b>LIVE {label}: <a href='{tv}'>{sym}</a></b> ({name})\n"
             f"🕒 {html.escape(ev['timestamp_ist'])} | Day <b>{ev['day_of_pattern']}/20</b> | Grade <b>{ev['setup_grade']} ({ev['setup_score']:.0f})</b>\n"
             f"💹 LTP <b>₹{ev['live_price']:.2f}</b> ({chg_sign}{ev['day_chg_pct']:.2f}%) | RVOL <b>{ev['projected_rvol_vs_base']:.1f}x</b> | CLV <b>{ev['daily_clv']:.0%}</b>\n\n"
-            f"🎯 <b>FULL TRADE PLAN:</b>\n"
+            f"🎯 <b>V2 TRADE PLAN:</b>\n"
             f"{entry_line}\n"
-            f"• <b>Stop Loss:</b> ₹{ev['invalidation_stop']:.2f} <i>(-{ev['live_risk_pct']:.1f}% | {sl_buf:.1f}% below flag low ₹{ev['shelf_low']:.2f})</i>\n"
-            f"{_fmt_tp('TP1', ev['tp1'], ev['rr_to_tp1'], ev['tp1_pct'])}\n"
-            f"{_fmt_tp('TP2', ev['tp2'], ev['rr_to_tp2'], ev['tp2_pct'])}\n"
-            f"{_fmt_tp('TP3', ev['tp3'], ev['rr_to_tp3'], ev['tp3_pct'])}\n\n"
+            f"{sl_lines}"
+            f"{_fmt_tp('TP1', ev['tp1'], ev['tp1_pct'], 'Book 45% → BE')}\n"
+            f"{_fmt_tp('TP2', ev['tp2'], ev['tp2_pct'], 'Book 30% → TP1')}\n"
+            f"{_fmt_tp('TP3', ev['tp3'], ev['tp3_pct'], 'Ride 25%')}\n\n"
             f"🧠 <i>{html.escape(ev['reason'])}</i>"
         )

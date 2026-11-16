@@ -1,8 +1,9 @@
 """
-Institutional Multi-Page PDF Backtest Report Generator (Pure Matplotlib PdfPages).
+Institutional Multi-Page PDF Backtest Report Generator (V2 Option A — Pure Matplotlib PdfPages).
 
 Produces a crisp Landscape A4 PDF containing:
-  - Page 1: Executive KPI Dashboard + Equity Curve + Outcome Breakdown + Grade & Monthly Charts
+  - Page 1: Executive KPI Dashboard (Gross + Net of 0.25% NSE costs) + Equity Curve + Outcome Breakdown
+            + Grade Monotonicity Chart + Year-by-Year (or Monthly) Performance Chart
   - Pages 2..N: Complete Trade-by-Trade Audit Table with EVERY exact milestone date:
       Pole Date, Entry Date, Breakout Date, SL Date, TP1 Date, TP2 Date, TP3 Date, Result, Ret %, R
   - Final Page: Visual Candlestick Proof Charts of Top Winning Flag-and-Pole Trades
@@ -23,7 +24,6 @@ import pandas as pd
 
 from src.backtester import BacktestTrade
 
-# Clean Print/Screen Palette (Navy Header + Crisp White Body + Institutional Accents)
 NAVY = "#0f172a"
 SLATE_DARK = "#1e293b"
 SLATE_TEXT = "#334155"
@@ -44,7 +44,6 @@ PURPLE = "#7c3aed"
 
 
 def _short_date(d: str) -> str:
-    """Format YYYY-MM-DD cleanly as YY-MM-DD (or '-') to fit 18 columns with generous whitespace."""
     if not d or d == "-":
         return "-"
     if len(d) == 10 and d[4] == "-":
@@ -64,6 +63,14 @@ def _outcome_style(outcome: str) -> tuple[str, str, str]:
     return mapping.get(outcome, (outcome, SLATE_TEXT, BG_CARD))
 
 
+def _sl_rule_label(sl_mode: str) -> str:
+    if sl_mode == "daily_close":
+        return "Daily-Close SL (-1.5% Flag, 4-6.5%) + -9% GTT"
+    if sl_mode == "intraday_gtt":
+        return "Intraday GTT SL (-2.5% Flag, 4.5-6.5%)"
+    return "Strict -0.5% Flag Low SL"
+
+
 def _draw_header_banner(fig: plt.Figure, title: str, subtitle: str, page_label: str) -> None:
     ax_hdr = fig.add_axes([0.0, 0.905, 1.0, 0.095])
     ax_hdr.set_xlim(0, 1)
@@ -71,8 +78,8 @@ def _draw_header_banner(fig: plt.Figure, title: str, subtitle: str, page_label: 
     ax_hdr.axis("off")
     ax_hdr.add_patch(Rectangle((0, 0), 1, 1, facecolor=NAVY, edgecolor="none"))
     ax_hdr.add_patch(Rectangle((0, 0), 1, 0.06, facecolor="#38bdf8", edgecolor="none"))
-    ax_hdr.text(0.025, 0.62, title, color="#ffffff", fontsize=14.5, fontweight="bold", va="center")
-    ax_hdr.text(0.025, 0.24, subtitle, color="#cbd5e1", fontsize=8.5, va="center")
+    ax_hdr.text(0.025, 0.62, title, color="#ffffff", fontsize=14.2, fontweight="bold", va="center")
+    ax_hdr.text(0.025, 0.24, subtitle, color="#cbd5e1", fontsize=8.3, va="center")
     ax_hdr.text(0.975, 0.50, page_label, color="#94a3b8", fontsize=8.5, ha="right", va="center", fontweight="bold")
 
 
@@ -97,11 +104,10 @@ def _draw_kpi_card(
         linewidth=0.9,
     )
     ax.add_patch(card)
-    # Left accent bar
     ax.add_patch(Rectangle((x, y + 0.01), 0.006, h - 0.02, facecolor=accent, edgecolor="none"))
-    ax.text(x + 0.016, y + h - 0.022, label.upper(), color=MUTED, fontsize=7.0, fontweight="bold", va="top")
-    ax.text(x + 0.016, y + h * 0.48, value, color=NAVY, fontsize=14.0, fontweight="bold", va="center")
-    ax.text(x + 0.016, y + 0.016, sub, color=SLATE_TEXT, fontsize=7.2, va="bottom")
+    ax.text(x + 0.016, y + h - 0.022, label.upper(), color=MUTED, fontsize=6.9, fontweight="bold", va="top")
+    ax.text(x + 0.016, y + h * 0.48, value, color=NAVY, fontsize=13.5, fontweight="bold", va="center")
+    ax.text(x + 0.016, y + 0.016, sub, color=SLATE_TEXT, fontsize=6.9, va="bottom")
 
 
 def _render_summary_page(
@@ -113,19 +119,19 @@ def _render_summary_page(
 ) -> None:
     fig = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
     period_str = meta.get("period", "2y")
-    univ_str = f"{meta.get('universe_scanned', 0)} NSE EQ stocks"
+    univ_str = f"{meta.get('universe_scanned', 0)} NSE EQ"
     date_range = f"{meta.get('date_from', 'N/A')} to {meta.get('date_to', 'N/A')}"
-    min_score = meta.get("min_score", 68)
+    min_score = meta.get("min_score", 66)
+    sl_lbl = _sl_rule_label(str(meta.get("sl_mode", "daily_close")))
 
     _draw_header_banner(
         fig,
-        "NSE DAILY FLAG-AND-POLE (<=20d) — HISTORICAL BACKTEST REPORT",
-        f"Window: {date_range} ({period_str})  |  Universe: {univ_str}  |  Min Score: {min_score}  |  "
-        f"Rules: Entry < BO, SL -0.5% Flag Low, 3-Tranche TP1/TP2/TP3 Trailing",
+        "NSE V2 FLAG-AND-POLE (<=20d) — HISTORICAL BACKTEST REPORT",
+        f"Window: {date_range} ({period_str})  |  Universe: {univ_str}  |  Score >= {min_score}  |  "
+        f"{sl_lbl}  |  45/30/25 TP (+4.5/+10/+18%)",
         f"Page 1 / {total_pages}",
     )
 
-    # KPI Cards Canvas
     ax_kpi = fig.add_axes([0.025, 0.65, 0.95, 0.235])
     ax_kpi.set_xlim(0, 1)
     ax_kpi.set_ylim(0, 1)
@@ -135,33 +141,35 @@ def _render_summary_page(
     xs = [0.0, 0.254, 0.508, 0.762]
     y_top, y_bot = 0.53, 0.03
 
+    cost_pct = summary.get("cost_pct_assumed", 0.25)
+
     # Row 1 KPIs
     _draw_kpi_card(
         ax_kpi, xs[0], y_top, cw, ch,
         "Total Trades Executed",
         f"{summary['total_trades']}",
-        f"Closed: {summary['closed_trades']}  |  Open: {summary['open_trades']}",
+        f"Closed: {summary['closed_trades']}  |  Open: {summary['open_trades']}  |  Hold: {summary['avg_hold_days']:.1f}d",
         BLUE,
     )
     _draw_kpi_card(
         ax_kpi, xs[1], y_top, cw, ch,
         "Overall Win Rate",
         f"{summary['win_rate_pct']:.1f}%",
-        f"TP1 Reached: {summary['tp1_hits']} ({summary['tp1_rate_pct']:.1f}%)",
-        GREEN if summary["win_rate_pct"] >= 50 else AMBER,
+        f"TP1 (+4.5%) Hit: {summary['tp1_hits']} ({summary['tp1_rate_pct']:.1f}%)",
+        GREEN if summary["win_rate_pct"] >= 55 else AMBER,
     )
     _draw_kpi_card(
         ax_kpi, xs[2], y_top, cw, ch,
         "TP2 / TP3 Hit Rates",
         f"{summary['tp2_rate_pct']:.1f}% / {summary['tp3_rate_pct']:.1f}%",
-        f"TP2: {summary['tp2_hits']} trades  |  TP3 Full: {summary['tp3_hits']} trades",
+        f"TP2 (+10%): {summary['tp2_hits']}  |  TP3 (+18%): {summary['tp3_hits']} trades",
         PURPLE,
     )
     _draw_kpi_card(
         ax_kpi, xs[3], y_top, cw, ch,
-        "Profit Factor",
-        f"{summary['profit_factor']:.2f}",
-        f"Avg Win: +{summary['avg_win_pct']:.1f}%  |  Avg Loss: {summary['avg_loss_pct']:.1f}%",
+        "Profit Factor (Gross / Net)",
+        f"{summary['profit_factor']:.2f} / {summary.get('net_profit_factor', summary['profit_factor']):.2f}",
+        f"Net assumes {cost_pct:.2f}% NSE cost | Avg Win +{summary['avg_win_pct']:.1f}%",
         GREEN if summary["profit_factor"] >= 1.5 else AMBER,
     )
 
@@ -170,32 +178,31 @@ def _render_summary_page(
         ax_kpi, xs[0], y_bot, cw, ch,
         "Avg Return / Trade",
         f"{summary['avg_return_pct']:+.2f}%",
-        f"Median: {summary['median_return_pct']:+.2f}%  |  Avg MFE: +{summary['avg_mfe_pct']:.1f}%",
+        f"Net ({cost_pct:.2f}% cost): {summary.get('net_avg_return_pct', summary['avg_return_pct']):+.2f}%  |  MFE: +{summary['avg_mfe_pct']:.1f}%",
         GREEN if summary["avg_return_pct"] > 0 else RED,
     )
     _draw_kpi_card(
         ax_kpi, xs[1], y_bot, cw, ch,
         "Expectancy (Avg R)",
         f"{summary['avg_r_multiple']:+.2f} R",
-        f"Initial SL Hit Rate: {summary['sl_rate_pct']:.1f}% ({summary['sl_hits']} trades)",
+        f"Initial SL Hit: {summary['sl_rate_pct']:.1f}% ({summary['sl_hits']} trades)",
         TEAL if summary["avg_r_multiple"] > 0 else RED,
     )
     _draw_kpi_card(
         ax_kpi, xs[2], y_bot, cw, ch,
-        "₹1.0L Portfolio Sim",
+        "₹1.0L Portfolio (10% Alloc)",
         f"₹{summary['final_equity_1l']:,.0f}",
-        f"Net: {summary['net_compounded_pct']:+.1f}% (10% alloc/trade) | Max DD: {summary['max_drawdown_pct']:.1f}%",
+        f"Net: ₹{summary.get('net_final_equity_1l', summary['final_equity_1l']):,.0f} ({summary.get('net_after_cost_compounded_pct', summary['net_compounded_pct']):+.1f}%) | DD {summary['max_drawdown_pct']:.1f}%",
         GREEN if summary["net_compounded_pct"] >= 0 else RED,
     )
     _draw_kpi_card(
         ax_kpi, xs[3], y_bot, cw, ch,
-        "Avg Holding Period",
-        f"{summary['avg_hold_days']:.1f} days",
-        f"Generated: {meta.get('generated_at_ist', '')}",
+        "1% Risk-Parity Portfolio",
+        f"₹{summary.get('risk_parity_equity_1l', summary['final_equity_1l']):,.0f}",
+        f"Max DD: {summary.get('risk_parity_max_dd_pct', summary['max_drawdown_pct']):.1f}%  |  {meta.get('generated_at_ist', '')}",
         SLATE_DARK,
     )
 
-    # 2x2 Charts Grid
     # Chart 1 (Top-Left): Equity Curve
     ax1 = fig.add_axes([0.055, 0.365, 0.43, 0.245])
     eq = summary.get("equity_curve", [])
@@ -244,30 +251,64 @@ def _render_summary_page(
         tp1_vals = [by_grade[g]["tp1_rate_pct"] for g in g_keys]
         b1 = ax3.bar(x_g - w_g / 2, wr_vals, width=w_g, color=BLUE, label="Win Rate %")
         b2 = ax3.bar(x_g + w_g / 2, tp1_vals, width=w_g, color=GREEN, label="TP1 Hit %")
-        for bar, g in zip(b1, g_keys):
+        for bar in b1:
             h = bar.get_height()
             ax3.text(bar.get_x() + bar.get_width() / 2, h + 1.5, f"{h:.0f}%", ha="center", fontsize=7.5, fontweight="bold", color=NAVY)
-        for bar, g in zip(b2, g_keys):
+        for bar in b2:
             h = bar.get_height()
             ax3.text(bar.get_x() + bar.get_width() / 2, h + 1.5, f"{h:.0f}%", ha="center", fontsize=7.5, fontweight="bold", color=GREEN)
-        x_lbls = [f"Grade {g}\n(n={by_grade[g]['count']}, avg {by_grade[g]['avg_return_pct']:+.1f}%)" for g in g_keys]
+        x_lbls = [
+            f"Grade {g} (PF {by_grade[g].get('profit_factor', 0):.2f})\nn={by_grade[g]['count']}, avg {by_grade[g]['avg_return_pct']:+.1f}%"
+            for g in g_keys
+        ]
         ax3.set_xticks(x_g)
-        ax3.set_xticklabels(x_lbls, fontsize=7.6)
-        ax3.set_ylim(0, 115)
+        ax3.set_xticklabels(x_lbls, fontsize=7.3)
+        if len(g_keys) == 1:
+            ax3.set_xlim(-0.85, 0.85)
+        ax3.set_ylim(0, 118)
         ax3.legend(fontsize=7.3, frameon=False, loc="upper right")
         ax3.grid(axis="y", color=BORDER, alpha=0.5, lw=0.6)
     else:
         ax3.text(0.5, 0.5, "No grade data", ha="center", va="center", color=MUTED)
-    ax3.set_title("Performance by Scanner Grade (A+ vs A vs B)", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
+    ax3.set_title("Performance by V2 Scanner Grade (A+ vs A vs B)", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
     ax3.tick_params(labelsize=7.5, colors=SLATE_TEXT)
     for sp in ("top", "right"):
         ax3.spines[sp].set_visible(False)
 
-    # Chart 4 (Bottom-Right): Monthly Avg Return %
+    # Chart 4 (Bottom-Right): Year-by-Year Breakdown (if >=2 years) else Monthly
     ax4 = fig.add_axes([0.555, 0.065, 0.415, 0.225])
+    by_year = summary.get("by_year", {})
     by_month = summary.get("by_month", {})
-    if by_month:
-        months = list(by_month.keys())[-14:]  # Last 14 active months cleanly readable
+    if len(by_year) >= 2:
+        yrs = list(by_year.keys())
+        finite_pfs = [by_year[y]["profit_factor"] for y in yrs if by_year[y]["profit_factor"] < 50.0]
+        cap_h = max(max(finite_pfs, default=2.0) * 1.25, 2.5)
+        y_pfs = [min(by_year[y]["profit_factor"], cap_h) for y in yrs]
+        y_cols = [GREEN if by_year[y]["avg_return_pct"] > 0 else RED for y in yrs]
+        bars4 = ax4.bar(np.arange(len(yrs)), y_pfs, color=y_cols, width=0.55)
+        ax4.axhline(1.0, color=SLATE_TEXT, ls="--", lw=0.8)
+        for b, y in zip(bars4, yrs):
+            pf_v = by_year[y]["profit_factor"]
+            wr_v = by_year[y]["win_rate_pct"]
+            pf_txt = "No Loss" if pf_v >= 50.0 else f"PF {pf_v:.2f}"
+            ax4.text(
+                b.get_x() + b.get_width() / 2,
+                b.get_height() + cap_h * 0.03,
+                f"{pf_txt}\n({wr_v:.0f}% WR)",
+                ha="center",
+                va="bottom",
+                fontsize=6.8,
+                fontweight="bold",
+                color=NAVY,
+            )
+        ax4.set_xticks(np.arange(len(yrs)))
+        ax4.set_xticklabels([f"{y}\n(n={by_year[y]['count']})" for y in yrs], fontsize=7.4)
+        ax4.set_ylim(0, cap_h * 1.32)
+        ax4.set_ylabel("Profit Factor", fontsize=8, color=SLATE_TEXT)
+        ax4.set_title("Year-by-Year Consistency (Profit Factor & Win Rate)", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
+        ax4.grid(axis="y", color=BORDER, alpha=0.5, lw=0.6)
+    elif by_month:
+        months = list(by_month.keys())[-14:]
         m_vals = [by_month[m]["avg_return_pct"] for m in months]
         m_cols = [GREEN if v >= 0 else RED for v in m_vals]
         ax4.bar(np.arange(len(months)), m_vals, color=m_cols, width=0.62)
@@ -275,10 +316,11 @@ def _render_summary_page(
         ax4.set_xticks(np.arange(len(months)))
         ax4.set_xticklabels([m[2:] for m in months], rotation=35, ha="right", fontsize=7.0)
         ax4.set_ylabel("Avg Return %", fontsize=8, color=SLATE_TEXT)
+        ax4.set_title("Average Trade Return % by Entry Month", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
         ax4.grid(axis="y", color=BORDER, alpha=0.5, lw=0.6)
     else:
-        ax4.text(0.5, 0.5, "No monthly data", ha="center", va="center", color=MUTED)
-    ax4.set_title("Average Trade Return % by Entry Month", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
+        ax4.text(0.5, 0.5, "No timeline data", ha="center", va="center", color=MUTED)
+        ax4.set_title("Timeline Performance", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
     ax4.tick_params(labelsize=7.5, colors=SLATE_TEXT)
     for sp in ("top", "right"):
         ax4.spines[sp].set_visible(False)
@@ -295,14 +337,12 @@ def _render_trade_table_pages(
     total_pages: int,
     rows_per_page: int = 22,
 ) -> int:
-    """Render cleanly paginated Trade-by-Trade Audit Tables showing ALL milestone dates."""
     if not trades:
         return start_page_num
 
-    # Order newest-first or chronological? Chronological newest-first lets user inspect recent trades immediately!
     ordered = sorted(trades, key=lambda t: (t.entry_date, t.symbol), reverse=True)
+    sl_lbl = _sl_rule_label(str(meta.get("sl_mode", "daily_close")))
 
-    # 18 crisp columns covering EVERY requested date & price level
     col_specs = [
         ("#", 0.025, "center"),
         ("Symbol", 0.088, "left"),
@@ -323,7 +363,6 @@ def _render_trade_table_pages(
         ("Ret %", 0.046, "right"),
         ("R", 0.037, "right"),
     ]
-    # Normalize widths to sum to 1.0
     total_w = sum(c[1] for c in col_specs)
     col_xs = []
     cur_x = 0.0
@@ -341,8 +380,8 @@ def _render_trade_table_pages(
         _draw_header_banner(
             fig,
             "TRADE-BY-TRADE AUDIT LOG — ALL DATES & TARGET MILESTONES",
-            f"Showing trades {chunk_start + 1}–{chunk_start + len(chunk)} of {len(ordered)} (Newest First)  |  "
-            f"Dates formatted YY-MM-DD  |  SL = -0.5% Flag Low  |  3-Tranche Return (33% TP1 / 33% TP2 / 34% TP3 or Trail)",
+            f"Trades {chunk_start + 1}–{chunk_start + len(chunk)} of {len(ordered)} (Newest First)  |  "
+            f"Dates: YY-MM-DD  |  {sl_lbl}  |  45% TP1 / 30% TP2 / 25% TP3",
             f"Page {page_num} / {total_pages}",
         )
 
@@ -351,14 +390,12 @@ def _render_trade_table_pages(
         ax.set_ylim(0, rows_per_page + 1.35)
         ax.axis("off")
 
-        # Table Header Row
         hdr_y = rows_per_page + 0.35
         ax.add_patch(Rectangle((0, hdr_y), 1.0, 0.92, facecolor=SLATE_DARK, edgecolor="none"))
         for x0, (lbl, nw, al) in zip(col_xs, norm_specs):
             tx = x0 + (0.004 if al == "left" else (nw - 0.004 if al == "right" else nw / 2.0))
             ax.text(tx, hdr_y + 0.46, lbl, color="#ffffff", fontsize=6.9, fontweight="bold", ha=al, va="center")
 
-        # Data Rows
         for r_idx, t in enumerate(chunk):
             global_idx = chunk_start + r_idx + 1
             y0 = rows_per_page - 1 - r_idx + 0.28
@@ -391,7 +428,7 @@ def _render_trade_table_pages(
             for c_i, (val, x0, (_, nw, al)) in enumerate(zip(vals, col_xs, norm_specs)):
                 tx = x0 + (0.004 if al == "left" else (nw - 0.004 if al == "right" else nw / 2.0))
                 cy = y0 + 0.48
-                if c_i == 15:  # Result badge pill
+                if c_i == 15:
                     ax.add_patch(
                         FancyBboxPatch(
                             (x0 + 0.003, y0 + 0.16),
@@ -412,10 +449,10 @@ def _render_trade_table_pages(
                     elif c_i == 2:
                         fw = "bold"
                         col_txt = GREEN if val == "A+" else (BLUE if val == "A" else MUTED)
-                    elif c_i == 8 and val != "-":  # SL Date
+                    elif c_i == 8 and val != "-":
                         col_txt = RED
                         fw = "bold"
-                    elif c_i in (10, 12, 14) and val != "-":  # TP1/TP2/TP3 Dates
+                    elif c_i in (10, 12, 14) and val != "-":
                         col_txt = GREEN
                         fw = "bold"
                     elif c_i in (16, 17):
@@ -425,11 +462,10 @@ def _render_trade_table_pages(
                         col_txt = "#94a3b8"
                     ax.text(tx, cy, val, color=col_txt, fontsize=6.6, fontweight=fw, ha=al, va="center")
 
-        # Footer note
         fig.text(
             0.02,
             0.015,
-            "Note: Zero-look-ahead walk-forward simulation. SL date shows initial SL hit (red SL HIT) or trailing BE/TP1 stop exit after partial target hit.",
+            "Note: Zero-look-ahead V2 walk-forward simulation. SL date shows Daily-Close SL / Hard -9% GTT hit (red SL HIT) or trailing BE/TP1 exit after partial target hit.",
             fontsize=6.8,
             color=MUTED,
         )
@@ -444,21 +480,22 @@ def _render_top_trades_chart_page(
     pdf: PdfPages,
     trades: List[BacktestTrade],
     daily_map: Dict[str, pd.DataFrame],
+    meta: Dict[str, Any],
     page_num: int,
     total_pages: int,
 ) -> None:
-    """Render a 2x2 visual proof gallery of top winning trades on actual Daily candles."""
     winners = [t for t in trades if t.symbol in daily_map and t.return_pct > 0]
     winners.sort(key=lambda t: (t.r_multiple, t.return_pct), reverse=True)
     showcase = winners[:4]
     if not showcase:
         return
 
+    sl_lbl = _sl_rule_label(str(meta.get("sl_mode", "daily_close")))
     fig = plt.figure(figsize=(11.69, 8.27), facecolor="#ffffff")
     _draw_header_banner(
         fig,
-        "TOP WINNING FLAG-AND-POLE TRADES — VISUAL PROOF GALLERY",
-        "Actual historical Daily OHLCV showing Pole, Flag Box, Pre-Breakout Entry, Stop Loss (-0.5% flag low), and Target Hits",
+        "TOP WINNING V2 FLAG-AND-POLE TRADES — VISUAL PROOF GALLERY",
+        f"Actual historical Daily OHLCV showing Pole, Flag Box, Pre-Breakout Entry, {sl_lbl}, and Target Hits",
         f"Page {page_num} / {total_pages}",
     )
 
@@ -474,7 +511,6 @@ def _render_top_trades_chart_page(
         ax.set_facecolor("#0f172a")
         df_full = daily_map[t.symbol]
 
-        # Window: 12 bars before pole_start_date through 8 bars after exit_date (max ~65 bars)
         p_ts = pd.Timestamp(t.pole_start_date)
         e_ts = pd.Timestamp(t.exit_date)
         idx_arr = df_full.index
@@ -495,14 +531,12 @@ def _render_top_trades_chart_page(
         c = sub["Close"].to_numpy(dtype=float)
         dates = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in sub.index]
 
-        # Plot candlesticks
         for i in range(n):
             col = "#22c55e" if c[i] >= o[i] else "#ef4444"
             ax.plot([i, i], [l[i], h[i]], color=col, lw=0.9, zorder=3)
             bh = max(abs(c[i] - o[i]), (h[i] - l[i]) * 0.06, 1e-4)
             ax.add_patch(Rectangle((i - 0.32, min(o[i], c[i])), 0.64, bh, facecolor=col, edgecolor=col, lw=0.4, zorder=4))
 
-        # Shade pole & flag box
         pole_xs = [i for i, ds in enumerate(dates) if t.pole_start_date <= ds <= t.pole_end_date]
         flag_xs = [i for i, ds in enumerate(dates) if t.pole_end_date < ds <= t.signal_date]
         if pole_xs:
@@ -521,7 +555,6 @@ def _render_top_trades_chart_page(
                 )
             )
 
-        # Horizontal Trade Plan Lines
         x_start = min(flag_xs) if flag_xs else max(0, n // 3)
         ax.hlines(t.sl_price, x_start, n - 0.3, colors="#f87171", linestyles="--", lw=0.9, zorder=5)
         ax.hlines(t.entry_price, x_start, n - 0.3, colors="#38bdf8", linestyles="-.", lw=0.9, zorder=5)
@@ -531,7 +564,6 @@ def _render_top_trades_chart_page(
         if t.tp3_date != "-":
             ax.hlines(t.tp3_price, x_start, n - 0.3, colors="#fbbf24", linestyles=":", lw=0.85, zorder=5)
 
-        # Entry marker
         ent_xs = [i for i, ds in enumerate(dates) if ds == t.entry_date]
         if ent_xs:
             ax.scatter([ent_xs[0]], [t.entry_price], marker="^", s=45, color="#38bdf8", edgecolor="#ffffff", lw=0.6, zorder=7)
@@ -555,9 +587,9 @@ def _render_top_trades_chart_page(
     fig.text(
         0.5,
         0.014,
-        "Chart Legend:  Green Shade = Breakout Pole   |   Blue Box = Coiled Flag Shelf   |   ▲ Cyan = Entry (<BO)   |   -- Red = SL (-0.5% Flag Low)   |   -- Green = TP1   |   -- Purple = TP2   |   ·· Gold = TP3",
+        "Chart Legend:  Green Shade = Pole   |   Blue Box = Flag Shelf   |   ▲ Cyan = Entry (<BO)   |   -- Red = Daily-Close SL   |   -- Green = TP1 (+4.5%)   |   -- Purple = TP2 (+10%)   |   ·· Gold = TP3 (+18%)",
         ha="center",
-        fontsize=7.2,
+        fontsize=7.0,
         color=SLATE_TEXT,
         fontweight="bold",
     )
@@ -573,7 +605,6 @@ def generate_backtest_pdf(
     daily_map: Optional[Dict[str, pd.DataFrame]] = None,
     rows_per_page: int = 22,
 ) -> Path:
-    """Build complete multi-page PDF Backtest Report and return saved Path."""
     out = Path(output_pdf_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -582,22 +613,16 @@ def generate_backtest_pdf(
     total_pages = 1 + n_table_pages + (1 if has_gallery else 0)
 
     with PdfPages(out) as pdf:
-        # Page 1: Executive Summary & Charts
         _render_summary_page(pdf, trades, summary, meta, total_pages=total_pages)
-
-        # Pages 2..N: Full Trade-by-Trade Audit Log (Pole Date, Entry Date, BO Date, SL Date, TP1/TP2/TP3 Dates)
         next_page = _render_trade_table_pages(
             pdf, trades, meta, start_page_num=2, total_pages=total_pages, rows_per_page=rows_per_page
         )
-
-        # Final Page: Visual Proof Gallery of Top Winners
         if has_gallery and daily_map is not None:
-            _render_top_trades_chart_page(pdf, trades, daily_map, page_num=next_page, total_pages=total_pages)
+            _render_top_trades_chart_page(pdf, trades, daily_map, meta, page_num=next_page, total_pages=total_pages)
 
-        # PDF Metadata
         d = pdf.infodict()
-        d["Title"] = "NSE Daily Flag-and-Pole (<=20d) Backtest Report"
-        d["Author"] = "NSE Flag-and-Pole Scanner"
-        d["Subject"] = "Point-in-time historical backtest with Pole, Entry, Breakout, SL, and TP dates"
+        d["Title"] = "NSE Daily V2 Flag-and-Pole (<=20d) Backtest Report"
+        d["Author"] = "NSE Flag-and-Pole Scanner V2"
+        d["Subject"] = "Zero-look-ahead V2 Option A backtest with Pole, Entry, Breakout, SL, and TP dates"
 
     return out

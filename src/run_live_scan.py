@@ -1,9 +1,10 @@
 """
-Stage-2 Live Market Scanner (Pure Daily Forming Candle Triggers).
+Stage-2 Live Market Scanner (Pure Daily Forming Candle Triggers — V2 Option A).
 Runs every 15 minutes during NSE trading hours (09:15 - 15:30 IST) via GitHub Actions.
-Reads state/coiled_candidates.json (+ config/custom_watchlist.txt), fetches today's live
-forming Daily candle via yfinance, evaluates Breakout / Gap-and-Go / Spring / Coil triggers,
-deduplicates alerts via state/sent_alerts.json, and sends annotated Telegram chart alerts.
+Reads state/coiled_candidates.json (+ config/custom_watchlist.txt), verifies NIFTY 50 Regime
+Guard, fetches today's live forming Daily candle via yfinance, evaluates Breakout / Gap-and-Go
+/ Spring / Coil triggers, strictly deduplicates alerts via state/sent_alerts.json, and sends
+annotated Telegram chart alerts.
 """
 
 from __future__ import annotations
@@ -18,10 +19,10 @@ from typing import Any, Dict, List
 from src.alert_ledger import AlertLedger
 from src.chart_generator import generate_pattern_chart
 from src.config_loader import load_config
-from src.data_fetcher import fetch_daily_batch
+from src.data_fetcher import fetch_daily_batch, fetch_nifty_benchmark
 from src.live_triggers import evaluate_live_daily_triggers
 from src.market_hours import is_nse_market_open, now_ist
-from src.pattern_detector import detect_daily_pattern
+from src.pattern_detector import detect_daily_pattern, evaluate_nifty_regime
 from src.telegram_notifier import TelegramNotifier
 from src.universe import load_custom_watchlist
 
@@ -53,6 +54,20 @@ def run_live_scan(
         return {"skipped": True, "reason": "market_closed"}
 
     t0 = time.time()
+    r_cfg = cfg.get("regime", {})
+    nifty_df = fetch_nifty_benchmark(
+        ticker=str(r_cfg.get("benchmark_ticker", "^NSEI")),
+        period=cfg["fetcher"].get("daily_period", "15mo"),
+    )
+    regime = evaluate_nifty_regime(nifty_df, cfg=cfg)
+    if not regime["regime_ok"]:
+        logger.warning(
+            "V2 NIFTY Regime Guard PAUSED live triggers: NIFTY 20d return %.2f%% < %.2f%%.",
+            regime["ret20_pct"],
+            float(r_cfg.get("min_nifty_20d_return_pct", -3.0)),
+        )
+        return {"skipped": True, "reason": "nifty_regime_paused", "nifty_regime": regime}
+
     state_dir = Path(cfg["runtime"]["state_dir"])
     state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,23 +86,23 @@ def run_live_scan(
         logger.info("No candidates in coiled_candidates.json or custom_watchlist.txt. Run Stage-1 EOD first.")
         return {"skipped": False, "monitored": 0, "triggers_fired": 0}
 
-    logger.info("Stage-2 Live Daily Scan checking %d symbols (%d coiled + %d custom)...", len(all_syms), len(cand_map), len(custom_syms))
+    logger.info("Stage-2 V2 Live Daily Scan checking %d symbols (%d coiled + %d custom)...", len(all_syms), len(cand_map), len(custom_syms))
 
-    # Fetch Daily OHLCV with live-day NaN repair enabled (fast because <= 40 symbols!)
+    # Fetch 15mo Daily OHLCV with live-day NaN repair (fast because <= 40 symbols!)
     daily_map = fetch_daily_batch(
         symbols=all_syms,
-        period="4mo",
+        period=cfg["fetcher"].get("daily_period", "15mo"),
         batch_size=40,
         batch_sleep_sec=0.5,
         max_retries=2,
         repair_nan_today=bool(cfg["fetcher"].get("repair_nan_today_with_15m", True)),
     )
 
-    # For custom watchlist symbols not already in coiled_candidates.json, evaluate prior-day daily pattern
+    # For custom watchlist symbols not already in coiled_candidates.json, evaluate prior-day V2 daily pattern
     for sym in custom_syms:
         if sym not in cand_map and sym in daily_map and len(daily_map[sym]) >= 50:
             df_prior = daily_map[sym].iloc[:-1]
-            setup, _ = detect_daily_pattern(sym, sym, df_prior, cfg)
+            setup, _ = detect_daily_pattern(sym, sym, df_prior, cfg, nifty_df=nifty_df)
             if setup is not None:
                 cand_map[sym] = setup.to_dict()
 
@@ -123,7 +138,6 @@ def run_live_scan(
         if not events:
             continue
 
-        # Take highest-priority trigger for this stock
         ev = events[0]
         seen_this_run.add(sym_key)
 
@@ -158,7 +172,7 @@ def run_live_scan(
         ledger.save()
 
     logger.info(
-        "Stage-2 Live Scan done in %.1fs | Monitored=%d | New Triggers=%d | SkippedDup=%d",
+        "Stage-2 V2 Live Scan done in %.1fs | Monitored=%d | New Triggers=%d | SkippedDup=%d",
         time.time() - t0,
         len(cand_map),
         len(fired),
@@ -167,6 +181,7 @@ def run_live_scan(
     return {
         "skipped": False,
         "timestamp_ist": now.strftime("%Y-%m-%d %H:%M IST"),
+        "nifty_regime": regime,
         "monitored": len(cand_map),
         "triggers_fired": len(fired),
         "skipped_already_sent": skipped_already_sent,
@@ -175,7 +190,7 @@ def run_live_scan(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stage-2 Live NSE Daily-Candle Trigger Scanner")
+    parser = argparse.ArgumentParser(description="Stage-2 Live NSE Daily-Candle Trigger Scanner (V2)")
     parser.add_argument("--config", default=None, help="Path to settings.yaml")
     parser.add_argument("--force", action="store_true", help="Run even outside NSE market hours")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate triggers without sending Telegram messages")
