@@ -126,7 +126,7 @@ def _render_summary_page(
 
     _draw_header_banner(
         fig,
-        "NSE V2 FLAG-AND-POLE (<=20d) — HISTORICAL BACKTEST REPORT",
+        f"NSE {meta.get('version', 'V2.1 Core + Coil').upper()} FLAG-AND-POLE (<=20d) — BACKTEST REPORT",
         f"Window: {date_range} ({period_str})  |  Universe: {univ_str}  |  Score >= {min_score}  |  "
         f"{sl_lbl}  |  45/30/25 TP (+4.5/+10/+18%)",
         f"Page 1 / {total_pages}",
@@ -270,7 +270,7 @@ def _render_summary_page(
         ax3.grid(axis="y", color=BORDER, alpha=0.5, lw=0.6)
     else:
         ax3.text(0.5, 0.5, "No grade data", ha="center", va="center", color=MUTED)
-    ax3.set_title("Performance by V2 Scanner Grade (A+ vs A vs B)", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
+    ax3.set_title("Performance by V2.1 Scanner Grade (A+ vs A vs B)", fontsize=9.2, fontweight="bold", color=NAVY, loc="left")
     ax3.tick_params(labelsize=7.5, colors=SLATE_TEXT)
     for sp in ("top", "right"):
         ax3.spines[sp].set_visible(False)
@@ -465,8 +465,8 @@ def _render_trade_table_pages(
         fig.text(
             0.02,
             0.015,
-            "Note: Zero-look-ahead V2 walk-forward simulation. SL date shows Daily-Close SL / Hard -9% GTT hit (red SL HIT) or trailing BE/TP1 exit after partial target hit.",
-            fontsize=6.8,
+            "Note: Zero-look-ahead V2.1 Core + Coil walk-forward simulation (150/200-SMA, Rising 50-SMA, Breadth50>=40%, 3m RS>=+15%, -15% 52wH, Box>=5.5%, Hold>=65%). SL date = Close SL / -9% GTT / trail exit.",
+            fontsize=6.6,
             color=MUTED,
         )
         pdf.savefig(fig, dpi=150)

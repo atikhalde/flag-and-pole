@@ -301,10 +301,19 @@ def generate_pattern_chart(
     ax_vol.set_xticks(ticks)
     ax_vol.set_xticklabels([pd.Timestamp(df.index[i]).strftime("%d %b") for i in ticks], color=TEXT_MUTED, fontsize=8)
 
-    # 6. Bottom-Right Scorecard Box (V2 Evidence-Calibrated 5-Pillar Breakdown)
+    # 6. Bottom-Right Scorecard Box (V2.1 Core + Coil 5-Pillar Breakdown)
     ax_info.axis("off")
     ps = setup.get("pillar_scores", {})
-    if "pole_quality" in ps:
+    if "rs_leadership" in ps:
+        score_lines = [
+            f"V2.1 GRADE {setup['grade']} ({setup['total_score']:.0f})",
+            f"Pole Qual: {ps.get('pole_quality', 0):.1f}/25",
+            f"Flag Coil: {ps.get('flag_coil', 0):.1f}/25",
+            f"RS/52wH  : {ps.get('rs_leadership', 0):.1f}/20",
+            f"Dry-Up   : {ps.get('supply_dryup', 0):.1f}/15",
+            f"BreadthS2: {ps.get('breadth_stage2', 0):.1f}/15",
+        ]
+    elif "pole_quality" in ps:
         score_lines = [
             f"V2 GRADE {setup['grade']} ({setup['total_score']:.0f})",
             f"Pole Qual: {ps.get('pole_quality', 0):.1f}/25",
@@ -359,7 +368,7 @@ def generate_pattern_chart(
         )
     else:
         title_str = (
-            f"NSE:{symbol} (Daily V2)  |  {setup['pattern_label']}  |  "
+            f"NSE:{symbol} (Daily V2.1)  |  {setup['pattern_label']}  |  "
             f"₹{last_c:.2f} ({chg_sign}{chg_pct:.2f}%)  |  Grade {setup['grade']} ({setup['total_score']:.0f}/100)"
         )
         title_col = TEXT_MAIN

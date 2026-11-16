@@ -187,17 +187,19 @@ class TelegramNotifier:
         if nifty_regime and nifty_regime.get("available"):
             n_ret = nifty_regime.get("ret20_pct", 0.0)
             n_50 = "Above 50 SMA" if nifty_regime.get("above_50sma") else "Below 50 SMA"
-            regime_line = f"🟢 <b>NIFTY 50 Regime:</b> 20d {n_ret:+.1f}% ({n_50}) — OPEN\n"
+            br_pct = nifty_regime.get("nse_breadth50_pct")
+            br_seg = f" | NSE Breadth50: <b>{br_pct:.1f}%</b>" if br_pct is not None else ""
+            regime_line = f"🟢 <b>Market Regime:</b> NIFTY 20d {n_ret:+.1f}% ({n_50}){br_seg} — OPEN\n"
 
         header = (
-            f"🎯 <b>NSE V2 FLAG-AND-POLE SCAN (≤20d | Grade A/A+)</b>\n"
+            f"🎯 <b>NSE V2.1 CORE+COIL FLAG-AND-POLE SCAN (≤20d | Grade A/A+)</b>\n"
             f"📅 <b>Date:</b> {html.escape(scan_date)} | 🔎 <b>Scanned:</b> {universe_count} NSE EQ stocks\n"
             f"{regime_line}"
             f"📦 <b>New High-Conviction Setups:</b> {len(candidates)} (Daily-Close SL + Hard GTT)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
         )
         if not candidates:
-            return header + "<i>No new Grade A/A+ ≤20d coiled flags met all V2 institutional filters today.</i>"
+            return header + "<i>No new Grade A/A+ ≤20d coiled flags met all V2.1 Core+Coil filters today.</i>"
 
         lines = [header]
         for idx, c in enumerate(candidates[:15], start=1):
@@ -243,11 +245,11 @@ class TelegramNotifier:
             sl_lines = f"• <b>Stop Loss (GTT):</b> ₹{c['invalidation_stop']:.2f} <i>(-{risk_pct:.1f}%)</i>\n"
 
         return (
-            f"{badge} <b>V2 PRE-BREAKOUT: <a href='{tv}'>{sym}</a></b> ({name})\n"
+            f"{badge} <b>V2.1 PRE-BREAKOUT: <a href='{tv}'>{sym}</a></b> ({name})\n"
             f"🏆 <b>Grade {c['grade']} ({c['total_score']:.0f}/100)</b> — {html.escape(c['pattern_label'])}{spring_tag}{s2_tag}\n"
             f"⏱ <b>Day {c['total_pattern_days']}/20</b> ({c['pole_days']}d Pole +{c['pole_high_gain_pct']:.0f}% on {c['pole_rvol']:.0f}x Vol + {c['base_days']}d Flag)\n"
-            f"📊 Flag ₹{c['shelf_low']:.2f}–₹{c['shelf_high']:.2f} (Dry-Up <b>{c['dryup_pct']:.0f}%</b> | 52wH {c.get('pct_from_52w_high', 0):+.0f}% | RS {c.get('rs63_vs_nifty', 0):+.0f}%)\n\n"
-            f"🎯 <b>V2 TRADE PLAN (Entry Below Breakout):</b>\n"
+            f"📊 Flag ₹{c['shelf_low']:.2f}–₹{c['shelf_high']:.2f} (Dry-Up <b>{c['dryup_pct']:.0f}%</b> | 52wH {c.get('pct_from_52w_high', 0):+.0f}% | 3m RS {c.get('rs63_vs_nifty', 0):+.0f}%)\n\n"
+            f"🎯 <b>V2.1 TRADE PLAN (Entry Below Breakout):</b>\n"
             f"• <b>Entry:</b> ₹{entry_p:.2f} <i>(Zone ₹{ez_lo:.2f}–₹{ez_hi:.2f} | BO ₹{bo_lvl:.2f})</i>\n"
             f"{sl_lines}"
             f"• <b>TP1 (+{c['tp1_pct']:.1f}%):</b> ₹{c['tp1']:.2f} <i>(Book 45% → Move SL to Breakeven)</i>\n"

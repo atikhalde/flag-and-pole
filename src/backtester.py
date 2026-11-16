@@ -1,11 +1,11 @@
 """
-Point-in-Time Historical Backtest Engine for NSE Daily (<=20d) Flag-and-Pole Scanner (V2 Option A).
+Point-in-Time Historical Backtest Engine for NSE Daily (<=20d) Flag-and-Pole Scanner (V2.1 Core + Coil).
 
 Strict Zero-Look-Ahead Design:
-  - For each stock, walks forward bar-by-bar using ONLY historical OHLCV up to bar t (df.iloc[:t+1])
-    and NIFTY 50 (^NSEI) strictly up to bar t's date.
-  - Uses fast pre-filter (only evaluates full 5-pillar V2 detector on bars that had a pole-sized
-    1-3d surge within the last 3..19 sessions) — mathematically equivalent, 20x+ faster.
+  - For each stock, walks forward bar-by-bar using ONLY historical OHLCV up to bar t (df.iloc[:t+1]),
+    NIFTY 50 (^NSEI) strictly up to bar t's date, and point-in-time cross-sectional NSE Market Breadth50.
+  - Uses fast vectorized O(1) pre-filters (pole surge window, 150/200-SMA, rising 50-SMA, -15% 52wH,
+    NSE Breadth50 >= 40%, NIFTY 20d >= -3%) — mathematically equivalent, 25x+ faster.
   - Simulates realistic next-session entry strictly below/at breakout ceiling and supports:
       * Option A ("daily_close", default): Daily-Close SL (-1.5% flag low, 4.0%-6.5% risk) + -9% Hard Intraday GTT
       * Option B ("intraday_gtt"): Hybrid Intraday GTT SL (-2.5% flag low, 4.5%-6.5% risk)
@@ -81,6 +81,8 @@ class BacktestTrade:
     sl_mode: str = "daily_close"
     hard_gtt_price: float = 0.0
     risk_pct: float = 5.0
+    rs63_vs_nifty: float = 0.0
+    nse_breadth50_pct: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -370,6 +372,8 @@ def _simulate_trade_forward(
         sl_mode=sl_mode,
         hard_gtt_price=round(hard_gtt, 2),
         risk_pct=risk_pct,
+        rs63_vs_nifty=round(float(setup.rs63_vs_nifty), 1),
+        nse_breadth50_pct=setup.nse_breadth50_pct,
     )
     return trade, exit_idx
 
@@ -385,8 +389,9 @@ def backtest_single_symbol(
     max_entry_wait_days: int = 5,
     max_hold_days: int = 60,
     nifty_df: Optional[pd.DataFrame] = None,
+    breadth50_series: Optional[pd.Series] = None,
 ) -> List[BacktestTrade]:
-    """Run zero-look-ahead V2 walk-forward Flag-and-Pole backtest on one stock."""
+    """Run zero-look-ahead V2.1 Core + Coil walk-forward Flag-and-Pole backtest on one stock."""
     if df is None or len(df) < 60:
         return []
 
@@ -397,15 +402,27 @@ def backtest_single_symbol(
     start_ts = pd.Timestamp(start_date) if start_date else None
     end_ts = pd.Timestamp(end_date) if end_date else None
 
-    # Precompute vectorized 200-SMA & 252d 52w-High once per stock for instant O(1) candidate gating
+    # Precompute vectorized V2.1 trend & 52w-high indicators once per stock for instant O(1) gating
     p_cfg = cfg["pattern"]
+    r_cfg = cfg.get("regime", {})
+    req_150 = bool(p_cfg.get("require_above_150sma", True))
     req_200 = bool(p_cfg.get("require_above_200sma", True))
-    max_below_52w = float(p_cfg.get("max_pct_below_52w_high", 25.0))
+    req_50_up = bool(p_cfg.get("require_sma50_rising", True))
+    slope_lb = int(p_cfg.get("sma50_slope_lookback", 10))
+    max_below_52w = float(p_cfg.get("max_pct_below_52w_high", 15.0))
+    enable_br_guard = bool(r_cfg.get("enable_breadth_guard", True))
+    min_breadth50 = float(r_cfg.get("min_nse_breadth50_pct", 40.0))
+
     close_s = df["Close"].astype(float)
     high_s = df["High"].astype(float)
+    sma50_arr = close_s.rolling(50, min_periods=1).mean().to_numpy()
+    sma150_arr = close_s.rolling(150, min_periods=1).mean().to_numpy()
     sma200_arr = close_s.rolling(200, min_periods=1).mean().to_numpy()
     hi52_arr = high_s.rolling(252, min_periods=1).max().to_numpy()
     close_arr = close_s.to_numpy()
+
+    br_index = breadth50_series.index if (breadth50_series is not None and not breadth50_series.empty) else None
+    br_vals = breadth50_series.to_numpy(dtype=float) if br_index is not None else None
 
     trades: List[BacktestTrade] = []
     cooldown_until_idx = -1
@@ -422,12 +439,25 @@ def backtest_single_symbol(
         if end_ts is not None and bar_ts > end_ts:
             break
 
-        # Instant O(1) V2 trend & 52w-high pre-gates before slicing DataFrame
+        # Instant O(1) V2.1 Stage-2 trend, rising 50-SMA, & -15% 52w-high pre-gates before slicing
         c_t = close_arr[t_int]
+        if req_150 and c_t <= sma150_arr[t_int]:
+            continue
         if req_200 and c_t <= sma200_arr[t_int]:
+            continue
+        if req_50_up and t_int >= slope_lb and sma50_arr[t_int] <= sma50_arr[t_int - slope_lb]:
             continue
         if hi52_arr[t_int] > 0 and ((c_t / hi52_arr[t_int]) - 1.0) * 100.0 < -abs(max_below_52w):
             continue
+
+        # Fast point-in-time NSE Market Breadth50 check (strictly <= bar_ts)
+        br_val: Optional[float] = None
+        if br_index is not None and br_vals is not None:
+            b_loc = int(br_index.searchsorted(bar_ts, side="right")) - 1
+            if b_loc >= 0:
+                br_val = float(br_vals[b_loc])
+                if enable_br_guard and br_val < min_breadth50:
+                    continue
 
         # Fast point-in-time NIFTY 50 Regime check before running full pattern detector
         if nifty_df is not None and not nifty_df.empty:
@@ -435,13 +465,21 @@ def backtest_single_symbol(
             if not reg["regime_ok"]:
                 continue
 
-        # Strict point-in-time slice — 270 prior bars gives exact 200 SMA & 252-day 52-week High!
+        # Strict point-in-time slice — 270 prior bars gives exact 150/200 SMA & 252-day 52-week High!
         slice_start = max(0, t_int - 270)
         df_pit = df.iloc[slice_start : t_int + 1]
         if len(df_pit) < 50:
             continue
 
-        setup, _ = detect_daily_pattern(symbol, company_name, df_pit, cfg, nifty_df=nifty_df, compute_vp=False)
+        setup, _ = detect_daily_pattern(
+            symbol,
+            company_name,
+            df_pit,
+            cfg,
+            nifty_df=nifty_df,
+            breadth50_pct=br_val,
+            compute_vp=False,
+        )
         if setup is None or setup.total_score < min_score:
             continue
 

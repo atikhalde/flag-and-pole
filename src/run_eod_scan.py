@@ -1,9 +1,10 @@
 """
-Stage-1 EOD Full NSE Daily Pattern Scanner (V2 — 5-Year Validated Option A).
+Stage-1 EOD Full NSE Daily Pattern Scanner (V2.1 Core + Coil — 5-Year Full-NSE Edge).
 Scans the entire NSE EQ liquid universe on Daily timeframe (1d) to catch high-tight
 post-pole coiled flags strictly within <= 20 trading days of the first breakout (pole),
-protected by V2 NIFTY 50 Regime Guard, 200-SMA Uptrend, 52w-High Proximity, Upper-Flag
-Coil, and Anti-Blowoff filters.
+protected by V2.1 Dual Market Regime Guard (NIFTY 50 20d + Live NSE Breadth50 >= 40%),
+Stage-2 150/200-SMA + Rising 50-SMA, 3m RS >= +15%, 52wH >= -15%, Box >= 5.5%,
+Upper-Pole Hold >= 65%, Pole 18-42%, and Upper-Flag Coil >= 20%.
 
 Outputs:
   1. Updates state/coiled_candidates.json for Stage-2 Live Market Scanner
@@ -27,7 +28,12 @@ from src.chart_generator import generate_pattern_chart
 from src.config_loader import load_config
 from src.data_fetcher import fetch_daily_batch, fetch_daily_single, fetch_nifty_benchmark
 from src.market_hours import is_nse_trading_day, now_ist
-from src.pattern_detector import DailyPatternSetup, detect_daily_pattern, evaluate_nifty_regime
+from src.pattern_detector import (
+    DailyPatternSetup,
+    compute_nse_breadth50,
+    detect_daily_pattern,
+    evaluate_nifty_regime,
+)
 from src.telegram_notifier import TelegramNotifier
 from src.universe import fetch_nse_universe
 from src.volume_profile import DailyVolumeProfile
@@ -107,7 +113,7 @@ def run_eod_scan(
     )
     if limit > 0:
         symbols = symbols[:limit]
-    logger.info("Stage-1 V2 EOD Daily Scan starting for %d NSE symbols (period=%s)...", len(symbols), f_cfg["daily_period"])
+    logger.info("Stage-1 V2.1 EOD Daily Scan starting for %d NSE symbols (period=%s)...", len(symbols), f_cfg["daily_period"])
 
     daily_map = fetch_daily_batch(
         symbols=symbols,
@@ -119,16 +125,66 @@ def run_eod_scan(
     )
     logger.info("Fetched clean Daily OHLCV for %d / %d symbols in %.1fs", len(daily_map), len(symbols), time.time() - t0)
 
-    # Detect V2 pure Daily chart patterns (strictly <= 20 trading days + 5 institutional gates)
+    # 2. Compute Live NSE Market Breadth50 (% of NSE stocks > 50-SMA) with ZERO extra API calls!
+    breadth_info = compute_nse_breadth50(daily_map, cfg=cfg)
+    breadth50_pct = breadth_info["breadth50_pct"] if breadth_info["enforced"] else None
+    if breadth_info["available"]:
+        logger.info(
+            "NSE Live Breadth50 (%s): %.1f%% (%d / %d stocks > 50 SMA) | Threshold>=%.0f%% | Guard=%s",
+            breadth_info["as_of"],
+            breadth_info["breadth50_pct"],
+            breadth_info["above_count"],
+            breadth_info["total_count"],
+            breadth_info["min_threshold_pct"],
+            "OPEN (OK)" if breadth_info["breadth_ok"] else "PAUSED (Weak Broad Market)",
+        )
+    regime["nse_breadth50_pct"] = breadth_info["breadth50_pct"]
+    regime["nse_breadth_above"] = breadth_info["above_count"]
+    regime["nse_breadth_total"] = breadth_info["total_count"]
+    regime["breadth_ok"] = breadth_info["breadth_ok"]
+
+    if not breadth_info["breadth_ok"]:
+        logger.warning(
+            "V2.1 NSE Breadth50 Guard PAUSED scan: %.1f%% (< %.1f%% threshold). Skipping breakout alerts in bear breadth.",
+            breadth_info["breadth50_pct"],
+            breadth_info["min_threshold_pct"],
+        )
+        state_obj = {
+            "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
+            "scan_date": breadth_info.get("as_of") or regime.get("as_of") or now.strftime("%Y-%m-%d"),
+            "universe_scanned": len(daily_map),
+            "nifty_regime": regime,
+            "nse_breadth50": breadth_info,
+            "candidates": [],
+        }
+        state_file.write_text(json.dumps(state_obj, indent=2), encoding="utf-8")
+        return {
+            "skipped": True,
+            "reason": "nse_breadth_paused",
+            "nifty_regime": regime,
+            "nse_breadth50": breadth_info,
+            "watchlist_count": 0,
+            "alert_count": 0,
+        }
+
+    # Detect V2.1 Core + Coil pure Daily chart patterns (strictly <= 20 trading days + 11 institutional gates)
     min_wl_score = float(s_cfg["min_watchlist_score"])
     prelim_hits: List[Tuple[str, pd.DataFrame]] = []
 
     for sym, df_d in daily_map.items():
-        setup, _ = detect_daily_pattern(sym, name_map.get(sym, sym), df_d, cfg, nifty_df=nifty_df)
+        setup, _ = detect_daily_pattern(
+            sym,
+            name_map.get(sym, sym),
+            df_d,
+            cfg,
+            nifty_df=nifty_df,
+            breadth50_pct=breadth50_pct,
+            compute_vp=False,
+        )
         if setup is not None and setup.total_score >= min_wl_score:
             prelim_hits.append((sym, df_d))
 
-    # Re-verify surviving hits with live-day NaN repair
+    # Re-verify surviving hits with live-day NaN repair and full Daily Volume Profile
     repair_enabled = bool(f_cfg.get("repair_nan_today_with_15m", True))
     matched: List[Tuple[DailyPatternSetup, DailyVolumeProfile | None, pd.DataFrame]] = []
     for sym, df_d in prelim_hits:
@@ -137,11 +193,19 @@ def run_eod_scan(
             repaired = fetch_daily_single(sym, period=f_cfg["daily_period"], repair_nan_today=True)
             if not repaired.empty and len(repaired) >= len(df_d):
                 df_verified = repaired
-        setup, vp = detect_daily_pattern(sym, name_map.get(sym, sym), df_verified, cfg, nifty_df=nifty_df)
+        setup, vp = detect_daily_pattern(
+            sym,
+            name_map.get(sym, sym),
+            df_verified,
+            cfg,
+            nifty_df=nifty_df,
+            breadth50_pct=breadth50_pct,
+            compute_vp=True,
+        )
         if setup is not None and setup.total_score >= min_wl_score:
             matched.append((setup, vp, df_verified))
 
-    # Sort best V2 setups first (Score -> RS vs NIFTY -> Upper-Flag Coil Position)
+    # Sort best V2.1 setups first (Score -> RS vs NIFTY -> Upper-Flag Coil Position)
     matched.sort(key=lambda item: (item[0].total_score, item[0].rs63_vs_nifty, item[0].sig_pos_in_box), reverse=True)
     max_wl = int(s_cfg["max_watchlist_size"])
     matched = matched[:max_wl]
@@ -154,10 +218,11 @@ def run_eod_scan(
         "scan_date": scan_date,
         "universe_scanned": len(daily_map),
         "nifty_regime": regime,
+        "nse_breadth50": breadth_info,
         "candidates": candidates_payload,
     }
     state_file.write_text(json.dumps(state_obj, indent=2), encoding="utf-8")
-    logger.info("Saved %d qualified V2 coiled candidates to %s", len(candidates_payload), state_file)
+    logger.info("Saved %d qualified V2.1 coiled candidates to %s", len(candidates_payload), state_file)
 
     # Filter setups that meet EOD Telegram alert threshold (Grade A/A+ >= 66) AND have NEVER been alerted before
     min_alert_score = float(s_cfg["min_eod_alert_score"])
@@ -241,9 +306,10 @@ def run_eod_scan(
 
     elapsed = time.time() - t0
     logger.info(
-        "Stage-1 V2 EOD Scan complete in %.1fs | Scanned=%d | Watchlist=%d | NewAlerts=%d | SkippedDup=%d | Charts=%d",
+        "Stage-1 V2.1 EOD Scan complete in %.1fs | Scanned=%d | Breadth50=%s | Watchlist=%d | NewAlerts=%d | SkippedDup=%d | Charts=%d",
         elapsed,
         len(daily_map),
+        f"{breadth_info['breadth50_pct']:.1f}%" if breadth_info["available"] else "N/A",
         len(candidates_payload),
         len(newly_alerted),
         len(skipped_already_sent),
@@ -254,6 +320,7 @@ def run_eod_scan(
         "scan_date": scan_date,
         "universe_scanned": len(daily_map),
         "nifty_regime": regime,
+        "nse_breadth50": breadth_info,
         "watchlist_count": len(candidates_payload),
         "alert_count": len(alert_items),
         "newly_alerted": newly_alerted,
@@ -264,7 +331,7 @@ def run_eod_scan(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stage-1 Full NSE Daily Coiled Pre-Breakout Scanner (V2)")
+    parser = argparse.ArgumentParser(description="Stage-1 Full NSE Daily Coiled Pre-Breakout Scanner (V2.1 Core + Coil)")
     parser.add_argument("--config", default=None, help="Path to settings.yaml")
     parser.add_argument("--force", action="store_true", help="Run even on weekends/holidays")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of symbols scanned (for testing)")

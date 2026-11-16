@@ -1,12 +1,13 @@
 """
-CLI Runner for Stage-3 Historical Flag-and-Pole Backtest Scanner & PDF Report Generator (V2 Option A).
+CLI Runner for Stage-3 Historical Flag-and-Pole Backtest Scanner & PDF Report Generator (V2.1 Core + Coil).
 
 Scans past Daily OHLCV history across NSE EQ equities with strict zero-look-ahead logic,
-automatically fetches +1 year warmup data + NIFTY 50 (^NSEI) so 200 SMA, 52-week High, and
-NIFTY Regime Guard are 100% exact from Day 1 of the requested backtest window, logs every
-trade's exact Pole Date, Entry Date, Breakout Date, SL Date, TP1/TP2/TP3 Dates, exports
-both CSV and a multi-page Executive PDF Report (Gross + Net of 0.25% NSE costs), and
-optionally sends the PDF directly to your Telegram bots.
+automatically fetches +1 year warmup data + NIFTY 50 (^NSEI) and builds the strictly
+point-in-time daily NSE Market Breadth50 series (% of NSE stocks > 50-SMA) so all 11
+V2.1 institutional gates are 100% exact from Day 1 of the requested backtest window,
+logs every trade's exact Pole Date, Entry Date, Breakout Date, SL Date, TP1/TP2/TP3 Dates,
+exports both CSV and a multi-page Executive PDF Report (Gross + Net of 0.25% NSE costs),
+and optionally sends the PDF directly to your Telegram bots.
 
 Examples:
   python -m src.run_backtest --period 2y --limit 300 --min-score 66
@@ -31,6 +32,7 @@ from src.backtester import BacktestTrade, backtest_single_symbol, compute_backte
 from src.config_loader import REPO_ROOT, load_config
 from src.data_fetcher import fetch_daily_batch, fetch_nifty_benchmark
 from src.market_hours import now_ist
+from src.pattern_detector import compute_breadth50_series
 from src.pdf_report import generate_backtest_pdf
 from src.telegram_notifier import TelegramNotifier
 from src.universe import fetch_nse_universe
@@ -83,7 +85,7 @@ def run_backtest(
     period: str = "2y",
     limit: int = 500,
     symbols_override: Optional[List[str]] = None,
-    min_score: float = 78.0,
+    min_score: float = 66.0,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     max_hold_days: int = 60,
@@ -120,7 +122,7 @@ def run_backtest(
     dl_end = (pd.Timestamp(eff_end) + timedelta(days=2)).strftime("%Y-%m-%d")
 
     logger.info(
-        "V2 Historical Flag-and-Pole Backtest starting | Period=%s (%s -> %s, warmup from %s) | Symbols=%d | MinScore=%.1f | SL=%s",
+        "V2.1 Core + Coil Backtest starting | Period=%s (%s -> %s, warmup from %s) | Symbols=%d | MinScore=%.1f | SL=%s",
         period,
         eff_start,
         eff_end,
@@ -148,6 +150,18 @@ def run_backtest(
     )
     logger.info("Downloaded historical Daily OHLCV for %d / %d symbols in %.1fs", len(daily_map), len(symbols), time.time() - t0)
 
+    min_br_univ = int(r_cfg.get("min_breadth_universe", 30))
+    breadth50_series = compute_breadth50_series(daily_map, min_stocks=min_br_univ)
+    if breadth50_series is not None and not breadth50_series.empty:
+        logger.info(
+            "Built strictly point-in-time NSE Breadth50 series (%d trading days | latest=%.1f%% | >=40%% active on %.1f%% of days)",
+            len(breadth50_series),
+            float(breadth50_series.iloc[-1]),
+            float((breadth50_series >= float(r_cfg.get("min_nse_breadth50_pct", 40.0))).mean() * 100.0),
+        )
+    else:
+        logger.info("Cross-sectional breadth guard bypassed (<%d symbols in subset run).", min_br_univ)
+
     all_trades: List[BacktestTrade] = []
     t_scan = time.time()
     for idx, (sym, df_d) in enumerate(daily_map.items(), start=1):
@@ -162,6 +176,7 @@ def run_backtest(
                 end_date=eff_end,
                 max_hold_days=max_hold_days,
                 nifty_df=nifty_df,
+                breadth50_series=breadth50_series,
             )
             all_trades.extend(sym_trades)
         if idx % 250 == 0:
@@ -193,6 +208,8 @@ def run_backtest(
         "universe_scanned": len(daily_map),
         "min_score": min_score,
         "sl_mode": tp_cfg.get("sl_mode", "daily_close"),
+        "version": "V2.1 Core + Coil",
+        "breadth_enforced": bool(breadth50_series is not None and not breadth50_series.empty),
         "date_from": eff_start,
         "date_to": eff_end,
         "generated_at_ist": now.strftime("%Y-%m-%d %H:%M IST"),
@@ -215,9 +232,9 @@ def run_backtest(
             extra_targets=cfg["runtime"].get("telegram_extra_targets", []),
         )
         caption = (
-            f"📊 <b>NSE V2 FLAG-AND-POLE (≤20d) BACKTEST REPORT ({period.upper()})</b>\n"
+            f"📊 <b>NSE V2.1 CORE+COIL FLAG-AND-POLE (≤20d) BACKTEST ({period.upper()})</b>\n"
             f"📅 {eff_start} → {eff_end} | 🔎 Scanned: <b>{len(daily_map)}</b> NSE stocks (Score ≥ {min_score:.0f})\n"
-            f"🛡 Rules: <b>Daily-Close SL + -9% GTT</b> | 45/30/25 TP (+4.5/+10/+18%)\n\n"
+            f"🛡 Rules: <b>V2.1 Core+Coil + Breadth≥40% + Daily-Close SL/-9% GTT</b> | 45/30/25 TP (+4.5/+10/+18%)\n\n"
             f"📈 <b>Key Results (Gross / Net 0.25% NSE Cost):</b>\n"
             f"• Trades: <b>{summary['total_trades']}</b> (Win Rate <b>{summary['win_rate_pct']:.1f}%</b>)\n"
             f"• TP1 Hit: <b>{summary['tp1_rate_pct']:.1f}%</b> | TP2: <b>{summary['tp2_rate_pct']:.1f}%</b> | TP3: <b>{summary['tp3_rate_pct']:.1f}%</b>\n"
@@ -229,7 +246,7 @@ def run_backtest(
 
     elapsed = time.time() - t0
     logger.info(
-        "V2 Backtest complete in %.1fs | Scanned=%d | Trades=%d | WinRate=%.1f%% | TP1=%.1f%% | PF=%.2f (Net %.2f) | PDF=%s",
+        "V2.1 Backtest complete in %.1fs | Scanned=%d | Trades=%d | WinRate=%.1f%% | TP1=%.1f%% | PF=%.2f (Net %.2f) | PDF=%s",
         elapsed,
         len(daily_map),
         summary["total_trades"],
@@ -252,12 +269,12 @@ def run_backtest(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Historical NSE Daily (<=20d) V2 Flag-and-Pole Backtest + PDF Report")
+    parser = argparse.ArgumentParser(description="Historical NSE Daily (<=20d) V2.1 Core+Coil Flag-and-Pole Backtest + PDF Report")
     parser.add_argument("--config", default=None, help="Path to settings.yaml")
     parser.add_argument("--period", default="2y", help="Backtest window (e.g., 6mo, 1y, 2y, 3y, 5y)")
     parser.add_argument("--limit", type=int, default=500, help="Max NSE stocks to backtest (0 = all ~2,403 NSE EQ)")
     parser.add_argument("--symbols", default="", help="Optional comma-separated symbols (e.g., BOROLTD,APLLTD)")
-    parser.add_argument("--min-score", type=float, default=78.0, help="Min V2 score threshold (default 78 = Grade A+, 66 = Grade A/A+)")
+    parser.add_argument("--min-score", type=float, default=66.0, help="Min V2.1 score threshold (default 66 = Grade A & A+, 78 = Grade A+ elite)")
     parser.add_argument("--start-date", default=None, help="Optional YYYY-MM-DD start filter")
     parser.add_argument("--end-date", default=None, help="Optional YYYY-MM-DD end filter")
     parser.add_argument("--max-hold-days", type=int, default=60, help="Max trading days to hold a trade")

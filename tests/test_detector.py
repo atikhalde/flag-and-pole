@@ -1,4 +1,4 @@
-"""Unit tests for the pure Daily-TF <=20-day V2 Option A High-Tight Flag & Backtest Scanner."""
+"""Unit tests for the pure Daily-TF <=20-day V2.1 Core + Coil High-Tight Flag & Backtest Scanner."""
 
 from __future__ import annotations
 
@@ -11,7 +11,11 @@ import pandas as pd
 from src.config_loader import load_config
 from src.live_triggers import evaluate_live_daily_triggers
 from src.market_hours import IST
-from src.pattern_detector import detect_daily_pattern
+from src.pattern_detector import (
+    compute_breadth50_series,
+    compute_nse_breadth50,
+    detect_daily_pattern,
+)
 
 
 def _make_synthetic_flag_df(
@@ -20,14 +24,17 @@ def _make_synthetic_flag_df(
     uptrend: bool = True,
     pole_top: float = 328.0,
     close_at_bottom: bool = False,
+    tight_micro_box: bool = False,
+    deep_retrace_base: bool = False,
+    pole_rvol_mult: float = 1.0,
 ) -> pd.DataFrame:
-    """Create a realistic synthetic Daily OHLCV High-Tight Flag series with 210+ bars for 200 SMA."""
+    """Create a realistic synthetic Daily OHLCV High-Tight Flag series with 210+ bars for 150/200 SMA."""
     rng = np.random.default_rng(42)
     n_pre = 210
     dates = pd.bdate_range("2025-11-01", periods=n_pre + pole_days + base_days)
 
     rows = []
-    # Smoothly drift from 170 -> 248 (uptrend) or 360 -> 248 (downtrend below 200 SMA)
+    # Smooth Stage-2 uptrend (175 -> 248) or downtrend (470 -> 248 below 150/200 SMA)
     start_px = 175.0 if uptrend else 470.0
     end_px = 248.0
     trend = np.linspace(start_px, end_px, n_pre)
@@ -40,36 +47,47 @@ def _make_synthetic_flag_df(
         v = rng.uniform(120_000, 220_000)
         rows.append((o, h, l, c, v))
 
-    # Breakout Pole (~30% gain over pre-pole close ~248 -> 322-328, ~18x institutional RVOL)
-    rows.append((255.0, 290.0, 252.0, 288.0, 3_600_000.0))
+    # Breakout Pole (~30% gain over pre-pole close ~248 -> 322-328, ~21x institutional RVOL * mult)
+    rows.append((255.0, 290.0, 252.0, 288.0, 3_600_000.0 * pole_rvol_mult))
     if pole_days >= 2:
-        rows.append((292.0, pole_top, 286.0, min(312.0, pole_top - 4.0), 2_800_000.0))
+        rows.append((292.0, pole_top, 286.0, min(312.0, pole_top - 4.0), 2_800_000.0 * pole_rvol_mult))
     if pole_days >= 3:
-        rows.append((314.0, pole_top + 6.0, 310.0, pole_top + 2.0, 2_200_000.0))
+        rows.append((314.0, pole_top + 6.0, 310.0, pole_top + 2.0, 2_200_000.0 * pole_rvol_mult))
 
-    # Tight High-Flag Shelf (box ~302..322 = ~6.6% wick box, healthy ~78% dry-up)
+    # High-Tight Flag Shelf
     for j in range(base_days):
         tight = 1.0 - (j / max(base_days, 1)) * 0.45
-        if j == base_days - 1 and close_at_bottom:
-            o, h, l, c = 310.0, 312.0, 302.0, 303.5  # bottom 7% of box -> falling knife!
+        if tight_micro_box:
+            # Ultra-narrow <3.5% micro-box stop-hunt trap -> must be rejected by V2.1 box_w >= 5.5%!
+            o, h, l, c = 313.0, 316.0, 309.0, 314.5
+        elif deep_retrace_base:
+            # Drops to ~288 (only ~50% upper hold of 244..328 pole -> rejected by V2.1 upper_hold >= 0.65!)
+            o, h, l, c = 292.0, 305.0, 286.0, 290.0 if j == 0 else 298.0
+        elif j == base_days - 1 and close_at_bottom:
+            o, h, l, c = 310.0, 312.0, 302.0, 303.0  # bottom 5% of box -> falling knife!
         elif j == base_days - 1:
             o, h, l, c = 313.0, 319.5, 311.5, 317.8  # coiled in upper 75% of box!
         else:
             o = 311.0 + rng.uniform(-2.0, 2.0) * tight
             c = 313.0 + rng.uniform(-2.0, 2.0) * tight
-            h = max(o, c) + (7.5 if j == 0 else 4.5) * tight
-            l = min(o, c) - (8.5 if j == 0 else 3.5) * tight
+            h = max(o, c) + (9.5 if j == 0 else 4.5) * tight
+            l = min(o, c) - (9.5 if j == 0 else 3.5) * tight
         v = 550_000.0 * (0.72 ** j) + 120_000.0
         rows.append((o, h, l, c, v))
 
     return pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"], index=dates)
 
 
-def _make_nifty_df(dates: pd.DatetimeIndex, ret20_pct: float = 2.0) -> pd.DataFrame:
-    """Create a synthetic NIFTY 50 series with desired 20-day return at the final bar."""
+def _make_nifty_df(dates: pd.DatetimeIndex, ret20_pct: float = 2.0, ret63_pct: float = 5.0) -> pd.DataFrame:
+    """Create a synthetic NIFTY 50 series with desired 20-day and 63-day returns at the final bar."""
     n = len(dates)
     closes = np.full(n, 24000.0, dtype=float)
-    if n >= 25:
+    if n >= 70:
+        c_end = 24000.0 * (1.0 + ret63_pct / 100.0)
+        c_20ago = c_end / (1.0 + ret20_pct / 100.0)
+        closes[-64:-20] = np.linspace(24000.0, c_20ago, 44)
+        closes[-21:] = np.linspace(c_20ago, c_end, 21)
+    elif n >= 25:
         closes[-21:] = np.linspace(24000.0, 24000.0 * (1.0 + ret20_pct / 100.0), 21)
     return pd.DataFrame(
         {"Open": closes, "High": closes * 1.005, "Low": closes * 0.995, "Close": closes, "Volume": np.full(n, 1e8)},
@@ -77,24 +95,31 @@ def _make_nifty_df(dates: pd.DatetimeIndex, ret20_pct: float = 2.0) -> pd.DataFr
     )
 
 
-class TestDailyFlagScannerV2(unittest.TestCase):
+class TestDailyFlagScannerV21(unittest.TestCase):
     def setUp(self) -> None:
         self.cfg = load_config()
 
-    def test_catches_clean_v2_within_20_day_flag(self) -> None:
+    def test_catches_clean_v21_within_20_day_flag(self) -> None:
         df = _make_synthetic_flag_df(base_days=8, pole_days=2)  # 10 total days <= 20
-        nifty = _make_nifty_df(df.index, ret20_pct=1.8)
-        setup, vp = detect_daily_pattern("SYNTH", "Synthetic Ltd", df, self.cfg, nifty_df=nifty)
+        nifty = _make_nifty_df(df.index, ret20_pct=1.8, ret63_pct=4.0)
+        setup, vp = detect_daily_pattern("SYNTH", "Synthetic Ltd", df, self.cfg, nifty_df=nifty, breadth50_pct=62.0)
         self.assertIsNotNone(setup)
         self.assertIsNotNone(vp)
         assert setup is not None
         self.assertLessEqual(setup.total_pattern_days, 20)
-        self.assertGreaterEqual(setup.total_score, 66.0)
-        self.assertIn(setup.grade, ("A+", "A"))
+        self.assertGreaterEqual(setup.total_score, 78.0)
+        self.assertEqual(setup.grade, "A+")
+        self.assertTrue(setup.above_150sma)
         self.assertTrue(setup.above_200sma)
-        self.assertGreaterEqual(setup.sig_pos_in_box, 0.25)
+        self.assertTrue(setup.sma50_rising)
+        self.assertGreaterEqual(setup.rs63_vs_nifty, 15.0)
+        self.assertGreaterEqual(setup.pct_from_52w_high, -15.0)
+        self.assertGreaterEqual(setup.shelf_wick_box_pct, 5.5)
+        self.assertGreaterEqual(setup.upper_pole_hold_pct, 65.0)
+        self.assertGreaterEqual(setup.sig_pos_in_box, 0.20)
+        self.assertEqual(setup.nse_breadth50_pct, 62.0)
 
-        # Verify V2 Option A Trade Plan invariants
+        # Verify V2.1 Option A Trade Plan invariants
         self.assertEqual(setup.sl_mode, "daily_close")
         self.assertLess(setup.entry_price, setup.breakout_level)
         self.assertLessEqual(setup.entry_zone_high, setup.breakout_level)
@@ -111,27 +136,73 @@ class TestDailyFlagScannerV2(unittest.TestCase):
         setup, _ = detect_daily_pattern("STALE", "Stale Base Ltd", df, self.cfg)
         self.assertIsNone(setup)
 
-    def test_v2_gates_reject_traps(self) -> None:
-        # 1. Rejects Stage-4 downtrend below 200 SMA
-        df_bear = _make_synthetic_flag_df(uptrend=False)
-        s_bear, _ = detect_daily_pattern("BEAR", "Bear Ltd", df_bear, self.cfg)
+    def test_v21_core_and_coil_gates_reject_all_traps(self) -> None:
+        df_ok = _make_synthetic_flag_df()
+        nifty_ok = _make_nifty_df(df_ok.index, ret20_pct=1.5, ret63_pct=4.0)
+
+        # 1. Rejects Stage-4 downtrend below 150/200 SMA
+        s_bear, _ = detect_daily_pattern("BEAR", "Bear Ltd", _make_synthetic_flag_df(uptrend=False), self.cfg, nifty_df=nifty_ok)
         self.assertIsNone(s_bear)
 
-        # 2. Rejects falling knife closing in bottom 25% of flag box
-        df_bot = _make_synthetic_flag_df(close_at_bottom=True)
-        s_bot, _ = detect_daily_pattern("KNIFE", "Knife Ltd", df_bot, self.cfg)
+        # 2. Rejects falling knife closing in bottom 20% of flag box
+        s_bot, _ = detect_daily_pattern("KNIFE", "Knife Ltd", _make_synthetic_flag_df(close_at_bottom=True), self.cfg, nifty_df=nifty_ok)
         self.assertIsNone(s_bot)
 
         # 3. Rejects parabolic blow-off pole (>42% high gain)
-        df_blow = _make_synthetic_flag_df(pole_top=375.0)
-        s_blow, _ = detect_daily_pattern("BLOW", "Blowoff Ltd", df_blow, self.cfg)
+        s_blow, _ = detect_daily_pattern("BLOW", "Blowoff Ltd", _make_synthetic_flag_df(pole_top=375.0), self.cfg, nifty_df=nifty_ok)
         self.assertIsNone(s_blow)
 
         # 4. Rejects entries during NIFTY 50 sharp sell-off (20d < -3.0%)
-        df_ok = _make_synthetic_flag_df()
-        nifty_crash = _make_nifty_df(df_ok.index, ret20_pct=-4.5)
-        s_crash, _ = detect_daily_pattern("SYNTH", "Synthetic Ltd", df_ok, self.cfg, nifty_df=nifty_crash)
+        nifty_crash = _make_nifty_df(df_ok.index, ret20_pct=-4.5, ret63_pct=-2.0)
+        s_crash, _ = detect_daily_pattern("SYNTH", "Synthetic Ltd", df_ok, self.cfg, nifty_df=nifty_crash, breadth50_pct=55.0)
         self.assertIsNone(s_crash)
+
+        # 5. Rejects weak NSE Market Breadth (< 40% stocks above 50-SMA)
+        s_weak_br, _ = detect_daily_pattern("SYNTH", "Synthetic Ltd", df_ok, self.cfg, nifty_df=nifty_ok, breadth50_pct=34.0)
+        self.assertIsNone(s_weak_br)
+
+        # 6. Rejects 3-month RS laggards (stock lags or fails +15% RS vs NIFTY)
+        nifty_hot = _make_nifty_df(df_ok.index, ret20_pct=2.0, ret63_pct=45.0)
+        s_lag, _ = detect_daily_pattern("SYNTH", "Synthetic Ltd", df_ok, self.cfg, nifty_df=nifty_hot, breadth50_pct=60.0)
+        self.assertIsNone(s_lag)
+
+        # 7. Rejects ultra-tight micro-box stop-hunt trap (< 5.5% wick box)
+        s_micro, _ = detect_daily_pattern("MICRO", "MicroBox Ltd", _make_synthetic_flag_df(tight_micro_box=True), self.cfg, nifty_df=nifty_ok)
+        self.assertIsNone(s_micro)
+
+        # 8. Rejects deep flag retracement (upper_hold < 0.65)
+        s_deep, _ = detect_daily_pattern("DEEP", "DeepFlag Ltd", _make_synthetic_flag_df(deep_retrace_base=True), self.cfg, nifty_df=nifty_ok)
+        self.assertIsNone(s_deep)
+
+        # 9. Soft climax RVOL penalty (>60x trims Pillar 1 by 8.5 pts without hard-killing elite setups)
+        s_norm, _ = detect_daily_pattern("NORM", "Norm Ltd", _make_synthetic_flag_df(pole_rvol_mult=1.0), self.cfg, nifty_df=nifty_ok, breadth50_pct=55.0)
+        s_climax, _ = detect_daily_pattern("CLIMAX", "Climax Ltd", _make_synthetic_flag_df(pole_rvol_mult=4.0), self.cfg, nifty_df=nifty_ok, breadth50_pct=55.0)
+        self.assertIsNotNone(s_norm)
+        self.assertIsNotNone(s_climax)
+        assert s_norm is not None and s_climax is not None
+        self.assertGreater(s_climax.pole_rvol, 60.0)
+        self.assertAlmostEqual(s_norm.total_score - s_climax.total_score, 8.5, places=1)
+
+    def test_live_and_historical_nse_breadth50_engine(self) -> None:
+        dates = pd.bdate_range("2026-01-01", periods=70)
+        # Build 40 synthetic stocks: 15 uptrending (> 50-SMA) + 25 downtrending (< 50-SMA) => 37.5% breadth!
+        daily_map = {}
+        for i in range(40):
+            trend = np.linspace(100.0, 140.0, 70) if i < 15 else np.linspace(140.0, 100.0, 70)
+            daily_map[f"STK{i:02d}"] = pd.DataFrame(
+                {"Open": trend, "High": trend * 1.01, "Low": trend * 0.99, "Close": trend, "Volume": np.full(70, 1e5)},
+                index=dates,
+            )
+        info = compute_nse_breadth50(daily_map, cfg=self.cfg)
+        self.assertTrue(info["available"])
+        self.assertTrue(info["enforced"])
+        self.assertAlmostEqual(info["breadth50_pct"], 37.5, places=1)
+        self.assertFalse(info["breadth_ok"])
+
+        series = compute_breadth50_series(daily_map, min_stocks=30)
+        self.assertIsNotNone(series)
+        assert series is not None
+        self.assertAlmostEqual(float(series.iloc[-1]), 37.5, places=1)
 
     def test_live_gap_and_go_trigger_fires(self) -> None:
         df_pre = _make_synthetic_flag_df(base_days=8, pole_days=2)
@@ -154,7 +225,7 @@ class TestDailyFlagScannerV2(unittest.TestCase):
         self.assertEqual(events[0].hard_stop_gtt, setup.hard_stop_gtt)
         self.assertLessEqual(events[0].day_of_pattern, 21)
 
-    def test_multi_bot_telegram_notifier_and_v2_captions(self) -> None:
+    def test_multi_bot_telegram_notifier_and_v21_captions(self) -> None:
         import os
         from src.telegram_notifier import TelegramNotifier
 
@@ -167,14 +238,23 @@ class TestDailyFlagScannerV2(unittest.TestCase):
         self.assertTrue(tn.enabled)
         self.assertEqual(tn.targets, [("tok1", "chat1"), ("tok2", "chat2")])
 
-        # Verify V2 EOD caption fits cleanly within Telegram's 1024-char photo caption cap
         df = _make_synthetic_flag_df()
-        setup, _ = detect_daily_pattern("SYNTH", "Synthetic Industries Ltd", df, self.cfg)
+        setup, _ = detect_daily_pattern("SYNTH", "Synthetic Industries Ltd", df, self.cfg, breadth50_pct=58.0)
         assert setup is not None
         cap = tn.format_eod_setup_caption(setup.to_dict())
         self.assertLess(len(cap), 1020)
+        self.assertIn("V2.1 PRE-BREAKOUT", cap)
         self.assertIn("Close SL (3:20 PM)", cap)
         self.assertIn("Emergency GTT", cap)
+
+        digest = tn.format_eod_digest(
+            "2026-11-16",
+            2400,
+            [setup.to_dict()],
+            nifty_regime={"available": True, "ret20_pct": 1.5, "above_50sma": True, "nse_breadth50_pct": 58.0},
+        )
+        self.assertIn("NSE Breadth50", digest)
+        self.assertIn("58.0%", digest)
 
         prev = {k: os.environ.get(k) for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_BOT_TOKEN_2", "TELEGRAM_CHAT_ID_2")}
         try:
@@ -215,7 +295,7 @@ class TestDailyFlagScannerV2(unittest.TestCase):
             self.assertTrue(ledger2.is_sent("BOROLTD"))
             self.assertFalse(ledger2.is_sent("RAMKY"))
 
-    def test_v2_daily_close_sl_dodges_stop_hunt_and_generates_pdf(self) -> None:
+    def test_v21_daily_close_sl_dodges_stop_hunt_and_generates_pdf(self) -> None:
         import tempfile
         from pathlib import Path
         from src.backtester import backtest_single_symbol, compute_backtest_summary
@@ -225,9 +305,6 @@ class TestDailyFlagScannerV2(unittest.TestCase):
         last_dt = df_base.index[-1]
         fut_dates = pd.bdate_range(last_dt + pd.Timedelta(days=1), periods=11)
 
-        # Day 1: fills planned entry (~316); Day 2: intraday stop-hunt wicks down to 294 (below Close SL ~299, above -9% GTT ~287)
-        #        but CLOSES green at 312 -> Option A Daily-Close SL MUST SURVIVE!
-        # Days 3..11: rallies smoothly through BO, TP1 (+4.5%), TP2 (+10%), TP3 (+18%)!
         fut_rows = [
             (315.5, 319.0, 312.0, 316.0, 900_000.0),   # Entry fill day
             (314.0, 316.0, 294.0, 312.5, 1_100_000.0), # Intraday stop-hunt wick below Close SL, closes above!
@@ -243,12 +320,25 @@ class TestDailyFlagScannerV2(unittest.TestCase):
 
         df_fut = pd.DataFrame(fut_rows, index=fut_dates, columns=["Open", "High", "Low", "Close", "Volume"])
         df_all = pd.concat([df_base, df_fut])
-        nifty_all = _make_nifty_df(df_all.index, ret20_pct=1.5)
+        nifty_all = _make_nifty_df(df_all.index, ret20_pct=1.5, ret63_pct=4.0)
+        breadth_ok = pd.Series(58.0, index=df_all.index)
+        breadth_bad = pd.Series(32.0, index=df_all.index)
 
-        trades = backtest_single_symbol("SYNTH", "Synthetic Flag Ltd", df_all, self.cfg, min_score=66.0, nifty_df=nifty_all)
+        # 1. Breadth < 40% must cleanly suppress backtest trades
+        trades_blocked = backtest_single_symbol(
+            "SYNTH", "Synthetic Flag Ltd", df_all, self.cfg, min_score=66.0, nifty_df=nifty_all, breadth50_series=breadth_bad
+        )
+        self.assertEqual(len(trades_blocked), 0)
+
+        # 2. Healthy Breadth >= 40% executes trade, dodges stop-hunt wick, and hits TP3
+        trades = backtest_single_symbol(
+            "SYNTH", "Synthetic Flag Ltd", df_all, self.cfg, min_score=66.0, nifty_df=nifty_all, breadth50_series=breadth_ok
+        )
         self.assertGreaterEqual(len(trades), 1)
         tr = trades[0]
         self.assertEqual(tr.sl_mode, "daily_close")
+        self.assertEqual(tr.nse_breadth50_pct, 58.0)
+        self.assertGreaterEqual(tr.rs63_vs_nifty, 15.0)
         self.assertNotEqual(tr.pole_start_date, "-")
         self.assertNotEqual(tr.entry_date, "-")
         self.assertNotEqual(tr.breakout_date, "-")
@@ -264,11 +354,19 @@ class TestDailyFlagScannerV2(unittest.TestCase):
         self.assertGreater(summary["net_final_equity_1l"], 100000.0)
 
         with tempfile.TemporaryDirectory() as td:
-            pdf_out = Path(td) / "test_v2_backtest.pdf"
+            pdf_out = Path(td) / "test_v21_backtest.pdf"
             generate_backtest_pdf(
                 trades=trades,
                 summary=summary,
-                meta={"period": "1y", "universe_scanned": 1, "min_score": 66, "sl_mode": "daily_close", "date_from": "2026-01-01", "date_to": "2026-11-16"},
+                meta={
+                    "period": "1y",
+                    "universe_scanned": 1,
+                    "min_score": 66,
+                    "sl_mode": "daily_close",
+                    "version": "V2.1 Core + Coil",
+                    "date_from": "2026-01-01",
+                    "date_to": "2026-11-16",
+                },
                 output_pdf_path=pdf_out,
                 daily_map={"SYNTH": df_all},
             )

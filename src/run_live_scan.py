@@ -75,6 +75,20 @@ def run_live_scan(
     alerts_file = state_dir / "sent_alerts.json"
 
     wl_state = _load_json(candidates_file, {"candidates": []})
+    saved_breadth = wl_state.get("nse_breadth50") or {}
+    if (
+        bool(r_cfg.get("enable_breadth_guard", True))
+        and saved_breadth.get("enforced")
+        and saved_breadth.get("breadth_ok") is False
+    ):
+        logger.warning(
+            "V2.1 NSE Breadth50 Guard PAUSED live triggers: EOD Breadth50=%.1f%% (< %.1f%%).",
+            saved_breadth.get("breadth50_pct", 0.0),
+            float(r_cfg.get("min_nse_breadth50_pct", 40.0)),
+        )
+        return {"skipped": True, "reason": "nse_breadth_paused", "nifty_regime": regime, "nse_breadth50": saved_breadth}
+
+    saved_br_pct = saved_breadth.get("breadth50_pct") if saved_breadth.get("enforced") else None
     candidates: List[Dict[str, Any]] = list(wl_state.get("candidates", []))
     cand_map: Dict[str, Dict[str, Any]] = {c["symbol"]: c for c in candidates}
 
@@ -86,7 +100,7 @@ def run_live_scan(
         logger.info("No candidates in coiled_candidates.json or custom_watchlist.txt. Run Stage-1 EOD first.")
         return {"skipped": False, "monitored": 0, "triggers_fired": 0}
 
-    logger.info("Stage-2 V2 Live Daily Scan checking %d symbols (%d coiled + %d custom)...", len(all_syms), len(cand_map), len(custom_syms))
+    logger.info("Stage-2 V2.1 Live Daily Scan checking %d symbols (%d coiled + %d custom)...", len(all_syms), len(cand_map), len(custom_syms))
 
     # Fetch 15mo Daily OHLCV with live-day NaN repair (fast because <= 40 symbols!)
     daily_map = fetch_daily_batch(
@@ -98,11 +112,11 @@ def run_live_scan(
         repair_nan_today=bool(cfg["fetcher"].get("repair_nan_today_with_15m", True)),
     )
 
-    # For custom watchlist symbols not already in coiled_candidates.json, evaluate prior-day V2 daily pattern
+    # For custom watchlist symbols not already in coiled_candidates.json, evaluate prior-day V2.1 daily pattern
     for sym in custom_syms:
         if sym not in cand_map and sym in daily_map and len(daily_map[sym]) >= 50:
             df_prior = daily_map[sym].iloc[:-1]
-            setup, _ = detect_daily_pattern(sym, sym, df_prior, cfg, nifty_df=nifty_df)
+            setup, _ = detect_daily_pattern(sym, sym, df_prior, cfg, nifty_df=nifty_df, breadth50_pct=saved_br_pct)
             if setup is not None:
                 cand_map[sym] = setup.to_dict()
 

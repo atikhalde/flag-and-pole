@@ -20,9 +20,9 @@ on:
         default: "0"
         type: string
       min_score:
-        description: "Minimum V2 scanner score (78 = Grade A+ elite [Recommended], 66 = Grade A & A+)"
+        description: "Minimum V2.1 score (66 = Grade A & A+ Core+Coil [Recommended], 78 = Grade A+ elite)"
         required: false
-        default: "78"
+        default: "66"
         type: string
       symbols:
         description: "Optional comma-separated specific stocks (leave blank for NSE universe, e.g. BOROLTD,AFFLE)"
@@ -69,7 +69,7 @@ jobs:
           TELEGRAM_CHAT_ID_2: ${{ secrets.TELEGRAM_CHAT_ID_2 }}
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          ARGS="--period ${{ inputs.period || '2y' }} --limit ${{ inputs.max_symbols || '0' }} --min-score ${{ inputs.min_score || '78' }}"
+          ARGS="--period ${{ inputs.period || '2y' }} --limit ${{ inputs.max_symbols || '0' }} --min-score ${{ inputs.min_score || '66' }}"
           if [ -n "${{ inputs.symbols }}" ]; then
             ARGS="$ARGS --symbols ${{ inputs.symbols }}"
           fi

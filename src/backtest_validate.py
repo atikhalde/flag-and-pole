@@ -46,20 +46,20 @@ def validate_symbol(
 
     setup_dict = setup.to_dict()
     charts_dir = Path(cfg["runtime"]["charts_dir"])
-    pre_chart = charts_dir / f"PROOF_V2_PRE_{symbol}_{pre_breakout_date}.png"
+    pre_chart = charts_dir / f"PROOF_V21_PRE_{symbol}_{pre_breakout_date}.png"
     generate_pattern_chart(symbol, df_pre, setup_dict, pre_chart, vp=vp)
 
     print("=" * 72)
-    print(f"✅ STAGE-1 V2 PRE-BREAKOUT MATCH: {symbol} as of {pre_breakout_date}")
+    print(f"✅ STAGE-1 V2.1 CORE+COIL PRE-BREAKOUT MATCH: {symbol} as of {pre_breakout_date}")
     print("=" * 72)
     print(f"  Pattern       : {setup.pattern_label} | Grade {setup.grade} ({setup.total_score:.1f}/100)")
     print(f"  Window        : Day {setup.total_pattern_days}/20 ({setup.pole_days}d Pole [{setup.pole_start_date}->{setup.pole_end_date}] + {setup.base_days}d Shelf)")
     print(f"  Pillar Scores : {json.dumps(setup.pillar_scores)}")
-    print(f"  V2 Filters    : Above200SMA={setup.above_200sma} | 52wH={setup.pct_from_52w_high:+.1f}% | RS63={setup.rs63_vs_nifty:+.1f}% | BoxPos={setup.sig_pos_in_box:.2f} | ATR14={setup.atr14_pct:.1f}%")
+    print(f"  V2.1 Filters  : >150SMA={setup.above_150sma} | >200SMA={setup.above_200sma} | 50Up={setup.sma50_rising} (+{setup.ext_above_50sma_pct:.1f}%) | 52wH={setup.pct_from_52w_high:+.1f}% | RS63={setup.rs63_vs_nifty:+.1f}% | Hold={setup.upper_pole_hold_pct:.1f}% | Box={setup.shelf_wick_box_pct:.1f}% | Pos={setup.sig_pos_in_box:.2f}")
     print(f"  Pole Surge    : +{setup.pole_high_gain_pct:.1f}% high / +{setup.pole_close_gain_pct:.1f}% close on {setup.pole_rvol:.1f}x RVOL")
     print(f"  Shelf Box     : ₹{setup.shelf_low:.2f}–₹{setup.shelf_high:.2f} (Wick {setup.shelf_wick_box_pct:.1f}%, Close {setup.shelf_close_spread_pct:.1f}%)")
     print(f"  Volume Dry-Up : {setup.dryup_pct:.1f}% collapse")
-    print(f"  V2 Trade Plan : Entry ₹{setup.entry_price:.2f} (<BO ₹{setup.breakout_level:.2f}) | Close SL ₹{setup.invalidation_stop:.2f} (-{setup.risk_pct:.1f}%) | Hard GTT ₹{setup.hard_stop_gtt:.2f} (-{setup.hard_stop_gtt_pct:.1f}%) | Hands-off GTT ₹{setup.intraday_gtt_sl:.2f}")
+    print(f"  Trade Plan    : Entry ₹{setup.entry_price:.2f} (<BO ₹{setup.breakout_level:.2f}) | Close SL ₹{setup.invalidation_stop:.2f} (-{setup.risk_pct:.1f}%) | Hard GTT ₹{setup.hard_stop_gtt:.2f} (-{setup.hard_stop_gtt_pct:.1f}%) | Hands-off GTT ₹{setup.intraday_gtt_sl:.2f}")
     print(f"  Targets       : TP1 ₹{setup.tp1:.2f} (+{setup.tp1_pct:.1f}%, 45%->BE) | TP2 ₹{setup.tp2:.2f} (+{setup.tp2_pct:.1f}%, 30%->TP1) | TP3 ₹{setup.tp3:.2f} (+{setup.tp3_pct:.1f}%, 25%)")
     print(f"  Proof Chart   : {pre_chart}")
 
@@ -69,11 +69,11 @@ def validate_symbol(
         sim_dt = datetime.strptime(f"{breakout_date} 15:20", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
         events = evaluate_live_daily_triggers(setup_dict, df_bo, cfg, as_of_dt=sim_dt)
         print("\n" + "=" * 72)
-        print(f"🚀 STAGE-2 V2 LIVE DAILY TRIGGER SIMULATION: {symbol} on {breakout_date}")
+        print(f"🚀 STAGE-2 V2.1 LIVE DAILY TRIGGER SIMULATION: {symbol} on {breakout_date}")
         print("=" * 72)
         if events:
             ev = events[0]
-            bo_chart = charts_dir / f"PROOF_V2_LIVE_{symbol}_{breakout_date}.png"
+            bo_chart = charts_dir / f"PROOF_V21_LIVE_{symbol}_{breakout_date}.png"
             generate_pattern_chart(symbol, df_bo, setup_dict, bo_chart, live_trigger=ev.to_dict())
             print(f"  Trigger       : {ev.trigger_type} (Day {ev.day_of_pattern}/20)")
             print(f"  Live Daily    : O ₹{ev.day_open} | H ₹{ev.day_high} | L ₹{ev.day_low} | C ₹{ev.live_price} ({ev.day_chg_pct:+.2f}%)")

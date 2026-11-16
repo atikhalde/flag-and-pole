@@ -1,6 +1,6 @@
 # ==============================================================================
-# NSE Daily High-Tight Flag / Coiled Pre-Breakout Scanner Configuration (V2)
-# Pure Daily Timeframe (1d) — Chart-Pattern Focused (5-Year Validated Option A)
+# NSE Daily High-Tight Flag / Coiled Pre-Breakout Scanner Configuration (V2.1)
+# Pure Daily Timeframe (1d) — V2.1 Core + Coil (5-Year Full-NSE 2,381-Trade Edge)
 # Full pattern (Breakout Pole + Tight Shelf Consolidation) strictly <= 20 days
 # ==============================================================================
 
@@ -12,20 +12,23 @@ universe:
   min_price: 50.0                 # INR minimum close price
   max_price: 25000.0              # INR maximum close price
   min_pole_value_cr: 2.0          # Min INR Crores traded on peak pole breakout day
-  min_history_days: 50            # Minimum daily candles required (uses exact 200 SMA when >=200 bars)
+  min_history_days: 50            # Minimum daily candles required (uses exact 150/200 SMA when available)
 
 fetcher:
-  daily_period: "15mo"            # ~310 trading days so 200 SMA & 52-week High are 100% exact
+  daily_period: "15mo"            # ~310 trading days so 150/200 SMA & 52-week High are 100% exact
   batch_size: 100                 # yfinance batch download size
   batch_sleep_sec: 1.0            # Polite delay between batches to avoid Yahoo throttling
   max_retries: 2
   repair_nan_today_with_15m: true # Fixes Yahoo NSE quirk where today's 1d OHLC can briefly show NaN
 
 regime:
-  # V2 Market Regime Guard (eliminates NIFTY crash traps: 20% WR / 0.31 PF in 5y study)
+  # V2.1 Dual Market Regime Guard (NIFTY 50 Momentum + Live NSE Market Breadth)
   benchmark_ticker: "^NSEI"       # NIFTY 50 Daily benchmark
-  enable_nifty_guard: true        # Pause new pre-breakout alerts during sharp NIFTY sell-offs
+  enable_nifty_guard: true        # Layer 1: Pause during sharp NIFTY sell-offs
   min_nifty_20d_return_pct: -3.0  # Require NIFTY 50 20-day return >= -3.0%
+  enable_breadth_guard: true      # Layer 2: Pause during broad NSE mid/small-cap bear phases (<40% PF 0.89)
+  min_nse_breadth50_pct: 40.0     # Min % of liquid NSE stocks trading above their 50-day SMA (0 extra API calls)
+  min_breadth_universe: 30        # Enforce cross-sectional breadth guard only when >= 30 stocks are loaded
 
 pattern:
   # STRICT 20-DAY PATTERN WINDOW from first breakout (pole start) to today
@@ -34,20 +37,26 @@ pattern:
   max_pole_days: 3
   min_base_days: 3                # Min tight consolidation days after pole
 
-  # V2 Structural Edge Gates (5-Year NSE Validated — Zero Look-Ahead)
-  require_above_200sma: true      # Gate 1: Primary uptrend only (blocks Stage-4 0.91 PF traps)
-  max_pct_below_52w_high: 25.0    # Gate 2: Within 25% of 52-week High (blocks dead-cat bounces)
-  max_pole_high_gain_pct: 42.0    # Gate 3: Anti-blowoff pole cap (passes leaders like BOROLTD 39.9%)
-  min_signal_pos_in_box: 0.25     # Gate 4: Signal close in upper 75% of flag (blocks 18% WR knives)
+  # V2.1 Core + Coil Institutional Edge Gates (Validated Strictly IS 2022-24 & Blind OOS 2025-26)
+  require_above_150sma: true      # Gate 1: Stage-2 medium-term trend (below 150 SMA = 0.80 OOS PF)
+  require_above_200sma: true      # Gate 2: Primary uptrend only (below 200 SMA = 0.90 OOS PF)
+  require_sma50_rising: true      # Gate 3: Rising 50-day SMA (falling 50 SMA = 0.84 OOS PF)
+  sma50_slope_lookback: 10        # Compare SMA50[t] > SMA50[t - 10]
+  min_rs63_vs_nifty_pct: 15.0     # Gate 4: 3-Month RS Leader vs NIFTY 50 (<0% = 0.67 OOS PF)
+  max_pct_below_52w_high: 15.0    # Gate 5: Within 15% of 52-week High (upgraded from 25% -> eliminates overhead supply)
+  min_pole_high_gain_pct: 18.0    # Gate 6a: Real institutional thrust pole (>= 18%)
+  max_pole_high_gain_pct: 42.0    # Gate 6b: Anti-blowoff pole cap (passes leaders like BOROLTD 39.9%)
+  min_base_wick_box_pct: 5.5      # Gate 7: Anti-micro-box floor (<5.5% tight box = 0.56 OOS PF stop-hunt magnet!)
+  min_upper_pole_hold: 0.65       # Gate 8: True High-Tight Flag — every base close holds upper 35% of pole
+  min_signal_pos_in_box: 0.20     # Gate 9: Upper-Flag Coil — blocks bottom-20% falling knives
+  soft_climax_rvol_cap: 60.0      # Soft -8.5 pt penalty in Pillar 1 for >60x climax volume (keeps elite BOROLTD eligible)
 
   # Breakout Pole Strength Criteria
   min_pole_close_gain_pct: 12.0   # Pre-pole close -> pole end close gain (%)
-  min_pole_high_gain_pct: 15.0    # Pre-pole close -> pole high gain (%)
   min_pole_rvol: 3.0              # Peak pole volume vs prior 20-day median volume
   require_breakout_over_20d_high: true  # First breakout must clear prior 20d resistance high
 
   # High-Tight Flag / Shelf Geometry Criteria
-  min_upper_pole_hold: 0.50       # Every base close holds in upper 50% of pole impulse
   max_base_close_spread_pct: 9.0  # Max closing tightness (max_close - min_close) / min_close (%)
   max_base_wick_box_pct: 15.0     # Max total shelf height (shelf_high - shelf_low) / shelf_low (%)
   max_already_broken_out_pct: 1.8 # Must NOT have already broken out >1.8% above shelf ceiling
@@ -62,11 +71,13 @@ pattern:
   value_area_pct: 0.70            # 70% Value Area (VAH / VAL)
 
 scoring:
-  # V2 Recalibrated 5-Pillar Score (Strict A+ > A > B monotonicity proven IS & OOS 2022-2026)
-  # Grade A+ >= 78 | Grade A >= 66 | Grade B >= 58
-  # Production 5Y full walk-forward: Grade A+ (>=78) delivers 66.9% WR, 71.2% TP1, 1.73 PF, -6.1% MaxDD!
+  # V2.1 Core + Coil 5-Pillar Institutional Score (0-100)
+  # Strict A+ > A monotonicity proven on 2,381 unbiased 5Y trades:
+  #   Grade A+ (>= 78): 71.3% WR | 75.4% TP1 | 2.29 Gross PF (3.33 OOS PF) | 2.11 Net PF
+  #   Grade A  (66-77.9): 66.1% WR | 69.6% TP1 | 1.34 Gross PF (1.41 OOS PF) [includes BOROLTD 73.5]
+  #   All >= 66 (A & A+): 70.5% WR | 74.6% TP1 | 2.15 Gross PF (2.88 OOS PF) | 1.97 Net PF
   min_watchlist_score: 66         # Min score (0-100) to store Grade A/A+ in state/coiled_candidates.json
-  min_eod_alert_score: 78         # Min score (0-100) for EOD Telegram Alerts (Grade A+ elite setups)
+  min_eod_alert_score: 66         # Min score (0-100) for EOD Telegram Alerts (Grade A & A+ V2.1 Core+Coil)
   max_eod_chart_alerts: 15        # Send annotated Daily Chart Pattern PNG for every alerted setup
   max_watchlist_size: 40          # Max coiled stocks monitored by Stage-2 Live Scanner
 
@@ -76,7 +87,7 @@ trade_plan:
   entry_flag_low_frac: 0.15       # Entry zone floor = 15% up from flag low
   entry_flag_high_frac: 0.72      # Entry zone ceiling = min(72% up flag box, 0.8% below BO)
 
-  # V2 Option A Stop-Loss: Daily-Close SL (3:20 PM IST) + Hard Emergency Broker GTT (-9%)
+  # Option A Stop-Loss: Daily-Close SL (3:20 PM IST) + Hard Emergency Broker GTT (-9%)
   # Supported modes: "daily_close" (Option A - Recommended) | "intraday_gtt" (Option B) | "strict_05" (Option C)
   sl_mode: "daily_close"
   sl_buffer_pct: 1.5              # Daily-Close SL buffer below flag low (1.5%)
@@ -87,7 +98,7 @@ trade_plan:
   intraday_gtt_ref_min_risk_pct: 4.5
   intraday_gtt_ref_max_risk_pct: 6.5
 
-  # V2 High-Win-Rate 3-Tranche Profit Booking (74.8% TP1 / 42.3% TP2 / 20.5% TP3 in 5y study)
+  # High-Win-Rate 3-Tranche Profit Booking (+4.5% / +10.0% / +18.0% | 45/30/25 weights)
   tp1_pct_target: 4.5             # TP1 (+4.5% above Entry) -> Book 45%, move SL to Breakeven
   tp2_pct_target: 10.0            # TP2 (+10.0% above Entry) -> Book 30%, trail SL up to TP1
   tp3_pct_target: 18.0            # TP3 (+18.0% above Entry) -> Ride final 25% runner
