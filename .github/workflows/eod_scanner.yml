@@ -1,33 +1,22 @@
-name: Stage 1 - NSE Daily EOD Coiled Scanner (<=20d Flag)
+name: Stage 1 - NSE Daily EOD Flag Scanner
 
 on:
   schedule:
     # 15:45 IST (Mon-Fri) = 10:15 UTC (15 mins after NSE market close)
-    - cron: "15 10 * * 1-5"
+    - cron: '15 10 * * 1-5'
   workflow_dispatch:
-    inputs:
-      force:
-        description: "Force run even on weekends or NSE holidays"
-        required: false
-        type: boolean
-        default: true
-      dry_run:
-        description: "Dry run (do not send Telegram alerts)"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: nse-scanner-state
+  group: eod-flag-scan
   cancel-in-progress: false
 
 jobs:
   eod-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -38,34 +27,30 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Stage-1 Full NSE Daily Pattern Scan
+      - name: Run Stage-1 Full NSE Daily Flag Scan
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          ARGS=""
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
-            ARGS="$ARGS --force"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python -m src.run_eod_scan --force
+          else
+            python -m src.run_eod_scan
           fi
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
-          fi
-          python -m src.run_eod_scan $ARGS
 
-      - name: Upload generated Daily Charts as workflow artifacts
+      - name: Upload generated Daily Charts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eod-daily-charts-${{ github.run_number }}
+          name: eod-daily-charts-${{ github.run_id }}
           path: output/charts/*.png
           if-no-files-found: ignore
           retention-days: 7

@@ -1,38 +1,27 @@
-name: Stage 2 - NSE Live Daily-Candle Trigger Scanner
+name: Stage 2 - NSE Live Flag Breakout Scanner
 
 on:
   schedule:
     # NSE Live Market Hours (Mon-Fri, IST = UTC + 5:30):
     # 09:15 IST -> 03:45 UTC (Opening Gap-and-Go check)
-    - cron: "45 3 * * 1-5"
+    - cron: '45 3 * * 1-5'
     # 09:30 IST to 15:15 IST -> 04:00 to 09:45 UTC every 15 minutes
-    - cron: "*/15 4-9 * * 1-5"
+    - cron: '*/15 4-9 * * 1-5'
     # 15:30 IST -> 10:00 UTC (Closing bell check)
-    - cron: "0 10 * * 1-5"
+    - cron: '0 10 * * 1-5'
   workflow_dispatch:
-    inputs:
-      force:
-        description: "Force run even when NSE market is closed"
-        required: false
-        type: boolean
-        default: true
-      dry_run:
-        description: "Dry run (do not send Telegram alerts)"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: nse-scanner-state
+  group: live-flag-scan
   cancel-in-progress: false
 
 jobs:
   live-trigger-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -43,12 +32,11 @@ jobs:
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: "pip"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run Stage-2 Live Daily-Candle Trigger Scan
@@ -57,14 +45,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          ARGS=""
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
-            ARGS="$ARGS --force"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python -m src.run_live_scan --force
+          else
+            python -m src.run_live_scan
           fi
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
-          fi
-          python -m src.run_live_scan $ARGS
 
       - name: Commit deduplication alert ledger
         run: |
