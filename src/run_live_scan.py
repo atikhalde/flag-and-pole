@@ -1,0 +1,179 @@
+"""
+Stage-2 Live Market Scanner (Pure Daily Forming Candle Triggers).
+Runs every 15 minutes during NSE trading hours (09:15 - 15:30 IST) via GitHub Actions.
+Reads state/coiled_candidates.json (+ config/custom_watchlist.txt), fetches today's live
+forming Daily candle via yfinance, evaluates Breakout / Gap-and-Go / Spring / Coil triggers,
+deduplicates alerts via state/sent_alerts.json, and sends annotated Telegram chart alerts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Any, Dict, List
+
+from src.chart_generator import generate_pattern_chart
+from src.config_loader import load_config
+from src.data_fetcher import fetch_daily_batch
+from src.live_triggers import evaluate_live_daily_triggers
+from src.market_hours import is_nse_market_open, now_ist
+from src.pattern_detector import detect_daily_pattern
+from src.telegram_notifier import TelegramNotifier
+from src.universe import load_custom_watchlist
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("live_scanner")
+
+
+def _load_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def run_live_scan(
+    cfg: Dict[str, Any],
+    force: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    now = now_ist()
+    if not force and not is_nse_market_open(now):
+        logger.info("NSE market is currently closed (%s). Use --force to override.", now.strftime("%Y-%m-%d %H:%M IST"))
+        return {"skipped": True, "reason": "market_closed"}
+
+    t0 = time.time()
+    state_dir = Path(cfg["runtime"]["state_dir"])
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    candidates_file = state_dir / "coiled_candidates.json"
+    alerts_file = state_dir / "sent_alerts.json"
+
+    wl_state = _load_json(candidates_file, {"candidates": []})
+    candidates: List[Dict[str, Any]] = list(wl_state.get("candidates", []))
+    cand_map: Dict[str, Dict[str, Any]] = {c["symbol"]: c for c in candidates}
+
+    # Merge custom watchlist symbols so they are always monitored live
+    custom_syms = load_custom_watchlist(cfg["universe"]["custom_watchlist_abs"])
+    all_syms = list(dict.fromkeys(list(cand_map.keys()) + custom_syms))
+
+    if not all_syms:
+        logger.info("No candidates in coiled_candidates.json or custom_watchlist.txt. Run Stage-1 EOD first.")
+        return {"skipped": False, "monitored": 0, "triggers_fired": 0}
+
+    logger.info("Stage-2 Live Daily Scan checking %d symbols (%d coiled + %d custom)...", len(all_syms), len(cand_map), len(custom_syms))
+
+    # Fetch Daily OHLCV with live-day NaN repair enabled (fast because <= 40 symbols!)
+    daily_map = fetch_daily_batch(
+        symbols=all_syms,
+        period="4mo",
+        batch_size=40,
+        batch_sleep_sec=0.5,
+        max_retries=2,
+        repair_nan_today=bool(cfg["fetcher"].get("repair_nan_today_with_15m", True)),
+    )
+
+    # For custom watchlist symbols not already in coiled_candidates.json, evaluate prior-day daily pattern
+    for sym in custom_syms:
+        if sym not in cand_map and sym in daily_map and len(daily_map[sym]) >= 50:
+            df_prior = daily_map[sym].iloc[:-1]
+            setup, _ = detect_daily_pattern(sym, sym, df_prior, cfg)
+            if setup is not None:
+                cand_map[sym] = setup.to_dict()
+
+    # Load daily deduplication ledger (resets automatically each NSE session date)
+    today_str = now.strftime("%Y-%m-%d")
+    sent_state = _load_json(alerts_file, {"session_date": today_str, "alerts": {}})
+    if sent_state.get("session_date") != today_str:
+        sent_state = {"session_date": today_str, "alerts": {}}
+
+    notifier = TelegramNotifier(
+        bot_token=cfg["runtime"]["telegram_bot_token"],
+        chat_id=cfg["runtime"]["telegram_chat_id"],
+        enabled=bool(cfg["telegram"]["enabled"]) and not dry_run,
+        tv_url_template=cfg["telegram"]["tradingview_url_template"],
+    )
+
+    charts_dir = Path(cfg["runtime"]["charts_dir"])
+    charts_dir.mkdir(parents=True, exist_ok=True)
+    fired: List[Dict[str, Any]] = []
+
+    for sym, cand in cand_map.items():
+        df_d = daily_map.get(sym)
+        if df_d is None or len(df_d) < 5:
+            continue
+
+        events = evaluate_live_daily_triggers(cand, df_d, cfg, as_of_dt=now)
+        if not events:
+            continue
+
+        # Take highest-priority trigger for this stock
+        ev = events[0]
+        dedup_key = f"{sym}:{ev.trigger_type}"
+        if dedup_key in sent_state["alerts"]:
+            logger.info("Skipping duplicate live alert %s (already sent today).", dedup_key)
+            continue
+
+        ev_dict = ev.to_dict()
+        chart_path = charts_dir / f"LIVE_{sym}_{ev.trigger_type}_{ev.session_date}.png"
+        caption = notifier.format_live_trigger_caption(ev_dict)
+
+        if bool(cfg["telegram"].get("send_charts", True)):
+            generate_pattern_chart(
+                symbol=sym,
+                df_daily=df_d,
+                setup=cand,
+                output_path=chart_path,
+                live_trigger=ev_dict,
+            )
+            notifier.send_photo(chart_path, caption)
+        else:
+            notifier.send_message(caption)
+
+        sent_state["alerts"][dedup_key] = {
+            "timestamp_ist": ev.timestamp_ist,
+            "price": ev.live_price,
+            "rvol": ev.projected_rvol_vs_base,
+        }
+        fired.append(ev_dict)
+
+    alerts_file.write_text(json.dumps(sent_state, indent=2), encoding="utf-8")
+
+    logger.info(
+        "Stage-2 Live Scan done in %.1fs | Monitored=%d | New Triggers=%d",
+        time.time() - t0,
+        len(cand_map),
+        len(fired),
+    )
+    return {
+        "skipped": False,
+        "timestamp_ist": now.strftime("%Y-%m-%d %H:%M IST"),
+        "monitored": len(cand_map),
+        "triggers_fired": len(fired),
+        "events": [{"symbol": e["symbol"], "trigger": e["trigger_type"], "price": e["live_price"]} for e in fired],
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Stage-2 Live NSE Daily-Candle Trigger Scanner")
+    parser.add_argument("--config", default=None, help="Path to settings.yaml")
+    parser.add_argument("--force", action="store_true", help="Run even outside NSE market hours")
+    parser.add_argument("--dry-run", action="store_true", help="Evaluate triggers without sending Telegram messages")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    summary = run_live_scan(cfg=cfg, force=args.force, dry_run=args.dry_run)
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

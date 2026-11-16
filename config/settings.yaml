@@ -1,0 +1,75 @@
+# ==============================================================================
+# NSE Daily High-Tight Flag / Coiled Pre-Breakout Scanner Configuration
+# Pure Daily Timeframe (1d) — Chart-Pattern Focused
+# Full pattern (Breakout Pole + Tight Shelf Consolidation) strictly <= 20 days
+# ==============================================================================
+
+universe:
+  # Auto-fetch official NSE EQUITY_L.csv; graceful fallback to bundled data/nse_universe.csv
+  nse_equity_csv_url: "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+  fallback_csv_path: "data/nse_universe.csv"
+  custom_watchlist_path: "config/custom_watchlist.txt"
+  min_price: 50.0                 # INR minimum close price
+  max_price: 25000.0              # INR maximum close price
+  min_pole_value_cr: 2.0          # Min INR Crores traded on peak pole breakout day
+  min_history_days: 50            # Minimum daily candles required
+
+fetcher:
+  daily_period: "5mo"             # Daily lookback (~100 trading sessions)
+  batch_size: 100                 # yfinance batch download size
+  batch_sleep_sec: 1.0            # Polite delay between batches to avoid Yahoo throttling
+  max_retries: 2
+  repair_nan_today_with_15m: true # Fixes Yahoo NSE quirk where today's 1d OHLC can briefly show NaN
+
+pattern:
+  # STRICT 20-DAY PATTERN WINDOW from first breakout (pole start) to today
+  max_total_pattern_days: 20      # pole_days + base_days <= 20 trading sessions!
+  min_pole_days: 1                # Pole (first breakout impulse) length: 1 to 3 days
+  max_pole_days: 3
+  min_base_days: 3                # Min tight consolidation days after pole
+
+  # Pillar 1: First Breakout Pole Strength (Max 25 pts)
+  min_pole_close_gain_pct: 12.0   # Pre-pole close -> pole end close gain (%)
+  min_pole_high_gain_pct: 15.0    # Pre-pole close -> pole high gain (%)
+  min_pole_rvol: 3.0              # Peak pole volume vs prior 20-day median volume
+  require_breakout_over_20d_high: true  # First breakout must clear prior 20d resistance high
+
+  # Pillar 2: High-Tight Flag / Shelf Geometry (Max 25 pts)
+  min_upper_pole_hold: 0.50       # Every base close holds in upper 50% of pole impulse
+  max_base_close_spread_pct: 9.0  # Max closing tightness (max_close - min_close) / min_close (%)
+  max_base_wick_box_pct: 15.0     # Max total shelf height (shelf_high - shelf_low) / shelf_low (%)
+  max_already_broken_out_pct: 1.8 # Must NOT have already broken out >1.8% above shelf ceiling
+
+  # Pillar 3: Volatility Contraction / NR Coiling (Max 20 pts)
+  max_recent_avg_range_pct: 5.5   # Last 3 sessions avg daily range (H-L)/C <= 5.5%
+
+  # Pillar 4: Volume Dry-Up / Supply Exhaustion (Max 20 pts)
+  max_dryup_ratio: 0.30           # Recent 3-4d avg vol <= 30% of peak pole vol (>=70% dry-up)
+  max_base_to_pole_vol_ratio: 0.65 # Total base volume <= 65% of total pole volume
+
+  # Pillar 5: Daily Volume Profile & Support Confluence (Max 10 pts)
+  vp_bins: 32                     # Visible-range Daily Volume Profile bins
+  value_area_pct: 0.70            # 70% Value Area (VAH / VAL)
+
+scoring:
+  min_watchlist_score: 60         # Min score (0-100) to store in state/coiled_candidates.json
+  min_eod_alert_score: 68         # Min score (0-100) to feature in EOD Telegram Digest
+  max_eod_chart_alerts: 8         # Max individual annotated Daily chart images sent at EOD
+  max_watchlist_size: 40          # Max coiled stocks monitored by Stage-2 Live Scanner
+
+live_triggers:
+  # Stage-2 Live Market Scanner evaluating TODAY's forming Daily Candle
+  gap_and_go_min_gap_pct: 1.2     # Opens >= 1.2% above prev close near/above shelf ceiling
+  breakout_buffer_pct: 0.3        # Live price >= shelf_high * 1.003
+  breakout_min_rvol: 1.8          # Time-adjusted Daily RVOL vs recent base avg volume
+  breakout_min_clv: 0.55          # Live daily close sits in upper 45% of today's range
+  spring_sweep_buffer_pct: 0.7    # Today's low pokes within 0.7% of / below shelf floor
+  spring_min_clv: 0.55            # Snaps back into upper half of daily candle & green
+  coil_max_dist_to_ceiling_pct: 2.5 # Within 2.5% of shelf ceiling on ultra-tight inside bar
+  min_minutes_after_open_for_rvol: 15
+
+telegram:
+  enabled: true
+  send_charts: true
+  send_eod_summary_even_if_empty: true
+  tradingview_url_template: "https://www.tradingview.com/chart/?symbol=NSE%3A{symbol}"

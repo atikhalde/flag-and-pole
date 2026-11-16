@@ -1,0 +1,4 @@
+# Optional Custom Watchlist (one NSE symbol per line, without .NS suffix)
+# These symbols are ALWAYS checked in both Stage-1 EOD and Stage-2 Live scans.
+# Lines starting with # are ignored.
+BOROLTD
