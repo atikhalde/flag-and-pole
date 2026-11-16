@@ -1,4 +1,15 @@
 {
-  "session_date": null,
-  "alerts": {}
+  "session_date": "2026-11-17",
+  "alerts": {
+    "POONAWALLA:SPRING_RETEST": {
+      "timestamp_ist": "2026-11-17 01:58 IST",
+      "price": 490.5,
+      "rvol": 0.71
+    },
+    "BOROLTD:GAP_AND_GO": {
+      "timestamp_ist": "2026-11-17 01:58 IST",
+      "price": 341.1,
+      "rvol": 23.76
+    }
+  }
 }
