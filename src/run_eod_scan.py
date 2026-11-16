@@ -131,6 +131,7 @@ def run_eod_scan(
         chat_id=cfg["runtime"]["telegram_chat_id"],
         enabled=bool(t_cfg["enabled"]) and not dry_run,
         tv_url_template=t_cfg["tradingview_url_template"],
+        extra_targets=cfg["runtime"].get("telegram_extra_targets", []),
     )
 
     if alert_items or bool(t_cfg.get("send_eod_summary_even_if_empty", True)):

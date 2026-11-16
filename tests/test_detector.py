@@ -99,6 +99,47 @@ class TestDailyFlagScanner(unittest.TestCase):
         self.assertEqual(events[0].trigger_type, "GAP_AND_GO")
         self.assertLessEqual(events[0].day_of_pattern, 21)
 
+    def test_multi_bot_telegram_notifier_targets(self) -> None:
+        import os
+        from src.config_loader import load_config
+        from src.telegram_notifier import TelegramNotifier
+
+        # Both Bot #1 and Bot #2 configured separately (duplicate ignored)
+        tn = TelegramNotifier(
+            bot_token="tok1",
+            chat_id="chat1",
+            enabled=True,
+            extra_targets=[("tok2", "chat2"), ("tok1", "chat1")],
+        )
+        self.assertTrue(tn.enabled)
+        self.assertEqual(tn.targets, [("tok1", "chat1"), ("tok2", "chat2")])
+
+        # Only Bot #2 configured (Bot #1 empty) still works cleanly
+        tn2 = TelegramNotifier(
+            bot_token="",
+            chat_id="",
+            enabled=True,
+            extra_targets=[("tok2", "chat2")],
+        )
+        self.assertTrue(tn2.enabled)
+        self.assertEqual(tn2.targets, [("tok2", "chat2")])
+
+        # Verify load_config picks up TELEGRAM_BOT_TOKEN_2 & TELEGRAM_CHAT_ID_2
+        prev = {k: os.environ.get(k) for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_BOT_TOKEN_2", "TELEGRAM_CHAT_ID_2")}
+        try:
+            os.environ["TELEGRAM_BOT_TOKEN"] = "t1"
+            os.environ["TELEGRAM_CHAT_ID"] = "c1"
+            os.environ["TELEGRAM_BOT_TOKEN_2"] = "t2"
+            os.environ["TELEGRAM_CHAT_ID_2"] = "c2"
+            cfg2 = load_config()
+            self.assertEqual(cfg2["runtime"]["telegram_extra_targets"], [("t2", "c2")])
+        finally:
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
 
 if __name__ == "__main__":
     unittest.main()

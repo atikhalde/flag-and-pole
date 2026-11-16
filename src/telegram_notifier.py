@@ -6,7 +6,7 @@ import html
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -20,17 +20,32 @@ class TelegramNotifier:
         chat_id: str,
         enabled: bool = True,
         tv_url_template: str = "https://www.tradingview.com/chart/?symbol=NSE%3A{symbol}",
+        extra_targets: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.bot_token = bot_token.strip()
         self.chat_id = chat_id.strip()
-        self.enabled = enabled and bool(self.bot_token) and bool(self.chat_id)
         self.tv_url_template = tv_url_template
-        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+
+        # Build deduplicated list of (bot_token, chat_id) destinations (Bot #1, Bot #2, ...)
+        targets: List[Tuple[str, str]] = []
+        if self.bot_token and self.chat_id:
+            targets.append((self.bot_token, self.chat_id))
+        for tok, cid in (extra_targets or []):
+            tok_c = str(tok).strip()
+            cid_c = str(cid).strip()
+            if tok_c and cid_c and (tok_c, cid_c) not in targets:
+                targets.append((tok_c, cid_c))
+
+        self.targets: List[Tuple[str, str]] = targets
+        self.enabled = enabled and bool(self.targets)
+        self.base_url = f"https://api.telegram.org/bot{self.bot_token}" if self.bot_token else ""
 
         if enabled and not self.enabled:
             logger.warning(
                 "Telegram credentials (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) not set — running in DRY-RUN mode."
             )
+        elif self.enabled:
+            logger.info("TelegramNotifier active with %d destination bot/chat target(s).", len(self.targets))
 
     def _tv_link(self, symbol: str) -> str:
         return self.tv_url_template.format(symbol=symbol)
@@ -40,14 +55,18 @@ class TelegramNotifier:
             logger.info("[TELEGRAM DRY-RUN MESSAGE]\n%s", text_html)
             return False
 
-        url = f"{self.base_url}/sendMessage"
-        payload = {
-            "chat_id": self.chat_id,
-            "text": text_html[:4096],
-            "parse_mode": "HTML",
-            "disable_web_page_preview": disable_preview,
-        }
-        return self._post_with_retry(url, data=payload)
+        any_ok = False
+        for idx, (tok, cid) in enumerate(self.targets, start=1):
+            url = f"https://api.telegram.org/bot{tok}/sendMessage"
+            payload = {
+                "chat_id": cid,
+                "text": text_html[:4096],
+                "parse_mode": "HTML",
+                "disable_web_page_preview": disable_preview,
+            }
+            ok = self._post_with_retry(url, data=payload, label=f"Bot #{idx}")
+            any_ok = any_ok or ok
+        return any_ok
 
     def send_photo(self, image_path: str | Path, caption_html: str) -> bool:
         if not self.enabled:
@@ -59,36 +78,41 @@ class TelegramNotifier:
             logger.warning("Chart image missing (%s); falling back to text message.", p)
             return self.send_message(caption_html)
 
-        url = f"{self.base_url}/sendPhoto"
         # Telegram sendPhoto caption limit is 1024 characters
         safe_caption = caption_html[:1020]
-        for attempt in range(3):
-            try:
-                with open(p, "rb") as img_fh:
-                    resp = requests.post(
-                        url,
-                        data={
-                            "chat_id": self.chat_id,
-                            "caption": safe_caption,
-                            "parse_mode": "HTML",
-                        },
-                        files={"photo": img_fh},
-                        timeout=30,
-                    )
-                if resp.status_code == 200:
-                    time.sleep(0.4)  # Respect Telegram rate limits
-                    return True
-                if resp.status_code == 429:
-                    retry_after = int(resp.json().get("parameters", {}).get("retry_after", 3))
-                    time.sleep(retry_after + 1)
-                    continue
-                logger.warning("Telegram sendPhoto HTTP %d: %s", resp.status_code, resp.text[:300])
-            except Exception as exc:
-                logger.warning("Telegram sendPhoto attempt %d failed: %s", attempt + 1, exc)
-            time.sleep(1.5 * (attempt + 1))
-        return False
+        any_ok = False
+        for idx, (tok, cid) in enumerate(self.targets, start=1):
+            url = f"https://api.telegram.org/bot{tok}/sendPhoto"
+            sent = False
+            for attempt in range(3):
+                try:
+                    with open(p, "rb") as img_fh:
+                        resp = requests.post(
+                            url,
+                            data={
+                                "chat_id": cid,
+                                "caption": safe_caption,
+                                "parse_mode": "HTML",
+                            },
+                            files={"photo": img_fh},
+                            timeout=30,
+                        )
+                    if resp.status_code == 200:
+                        time.sleep(0.4)  # Respect Telegram rate limits
+                        sent = True
+                        break
+                    if resp.status_code == 429:
+                        retry_after = int(resp.json().get("parameters", {}).get("retry_after", 3))
+                        time.sleep(retry_after + 1)
+                        continue
+                    logger.warning("Telegram [Bot #%d] sendPhoto HTTP %d: %s", idx, resp.status_code, resp.text[:300])
+                except Exception as exc:
+                    logger.warning("Telegram [Bot #%d] sendPhoto attempt %d failed: %s", idx, attempt + 1, exc)
+                time.sleep(1.5 * (attempt + 1))
+            any_ok = any_ok or sent
+        return any_ok
 
-    def _post_with_retry(self, url: str, data: Dict[str, Any]) -> bool:
+    def _post_with_retry(self, url: str, data: Dict[str, Any], label: str = "Bot #1") -> bool:
         for attempt in range(3):
             try:
                 resp = requests.post(url, data=data, timeout=20)
@@ -99,9 +123,9 @@ class TelegramNotifier:
                     retry_after = int(resp.json().get("parameters", {}).get("retry_after", 3))
                     time.sleep(retry_after + 1)
                     continue
-                logger.warning("Telegram API HTTP %d: %s", resp.status_code, resp.text[:300])
+                logger.warning("Telegram [%s] API HTTP %d: %s", label, resp.status_code, resp.text[:300])
             except Exception as exc:
-                logger.warning("Telegram API attempt %d failed: %s", attempt + 1, exc)
+                logger.warning("Telegram [%s] API attempt %d failed: %s", label, attempt + 1, exc)
             time.sleep(1.5 * (attempt + 1))
         return False
 

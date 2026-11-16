@@ -101,6 +101,7 @@ def run_live_scan(
         chat_id=cfg["runtime"]["telegram_chat_id"],
         enabled=bool(cfg["telegram"]["enabled"]) and not dry_run,
         tv_url_template=cfg["telegram"]["tradingview_url_template"],
+        extra_targets=cfg["runtime"].get("telegram_extra_targets", []),
     )
 
     charts_dir = Path(cfg["runtime"]["charts_dir"])

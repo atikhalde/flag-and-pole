@@ -22,10 +22,25 @@ def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
     cfg["universe"]["fallback_csv_abs"] = str(REPO_ROOT / cfg["universe"]["fallback_csv_path"])
     cfg["universe"]["custom_watchlist_abs"] = str(REPO_ROOT / cfg["universe"]["custom_watchlist_path"])
 
-    # Runtime secrets from environment
+    # Runtime secrets from environment (supports primary Bot #1 + optional Bot #2)
+    bot1_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    bot1_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    bot2_token = os.environ.get("TELEGRAM_BOT_TOKEN_2", "").strip()
+    bot2_chat = os.environ.get("TELEGRAM_CHAT_ID_2", "").strip()
+
+    extra_targets = []
+    if bot2_chat:
+        # If TELEGRAM_BOT_TOKEN_2 is omitted, cleanly fall back to primary bot token for 2nd chat
+        eff_token2 = bot2_token or bot1_token
+        if eff_token2:
+            extra_targets.append((eff_token2, bot2_chat))
+
     cfg["runtime"] = {
-        "telegram_bot_token": os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
-        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", "").strip(),
+        "telegram_bot_token": bot1_token,
+        "telegram_chat_id": bot1_chat,
+        "telegram_bot_token_2": bot2_token,
+        "telegram_chat_id_2": bot2_chat,
+        "telegram_extra_targets": extra_targets,
         "state_dir": str(REPO_ROOT / "state"),
         "charts_dir": str(REPO_ROOT / "output" / "charts"),
     }
