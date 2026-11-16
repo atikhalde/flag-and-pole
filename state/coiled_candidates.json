@@ -1,5 +1,5 @@
 {
-  "updated_at_ist": "2026-11-17 02:03:00 IST",
+  "updated_at_ist": "2026-11-17 02:09:54 IST",
   "scan_date": "2026-11-16",
   "universe_scanned": 2402,
   "candidates": [
@@ -723,10 +723,10 @@
       "range_contraction_ratio": 0.457,
       "tight_doji_count": 4,
       "has_spring_bar": true,
-      "base_avg_vol": 3066.5,
-      "recent_avg_vol": 2285.2,
-      "dryup_pct": 95.68,
-      "base_to_pole_vol_pct": 35.05,
+      "base_avg_vol": 3065.2,
+      "recent_avg_vol": 2282.8,
+      "dryup_pct": 95.69,
+      "base_to_pole_vol_pct": 35.04,
       "vah": 842.07,
       "poc": 776.41,
       "val": 710.75,
@@ -758,7 +758,7 @@
         "Pole (3d): +26.4% high / +17.4% close on 41.9x RVOL (\u20b94.2 Cr)",
         "High-Tight Shelf (8d base, Day 11/20): close box 4.6%, holding upper 60% of pole",
         "Dry stop-sweep / spring reclaim candle near shelf floor",
-        "Volume Dry-Up: 95.7% collapse vs pole peak (entire base traded only 35.1% of pole volume)"
+        "Volume Dry-Up: 95.7% collapse vs pole peak (entire base traded only 35.0% of pole volume)"
       ]
     },
     {
