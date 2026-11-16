@@ -159,16 +159,17 @@ def generate_pattern_chart(
         ax_price.axvline(n - 1, color="#facc15", ls="--", lw=1.0, alpha=0.7, zorder=2)
 
     # ------------------------------------------------------------------
-    # 3. Structural Price Lines: VAH, POC, VAL, SL, TP1, TP2, TP3
+    # 3. Structural Price Lines: VAH, POC, VAL, SL, Entry (Below BO), TP1, TP2, TP3
     # ------------------------------------------------------------------
     vah = setup.get("vah")
     poc = setup.get("poc")
     val = setup.get("val")
-    entry_bo = float(setup.get("entry_breakout", shelf_high * 1.003))
+    bo_lvl = float(setup.get("breakout_level", shelf_high))
+    entry_price = float(setup.get("entry_price", setup.get("last_close", shelf_high * 0.985)))
     stop = float(setup["invalidation_stop"])
-    tp1 = float(setup.get("tp1", setup.get("target_1_bos", entry_bo * 1.06)))
-    tp2 = float(setup.get("tp2", setup.get("target_2_ext", entry_bo * 1.12)))
-    tp3 = float(setup.get("tp3", entry_bo * 1.20))
+    tp1 = float(setup.get("tp1", setup.get("target_1_bos", bo_lvl * 1.05)))
+    tp2 = float(setup.get("tp2", setup.get("target_2_ext", bo_lvl * 1.12)))
+    tp3 = float(setup.get("tp3", bo_lvl * 1.20))
 
     if poc:
         ax_price.axhline(poc, color=POC_COL, ls="-", lw=1.1, alpha=0.80, zorder=2)
@@ -183,16 +184,16 @@ def generate_pattern_chart(
     y_min_val = min(float(np.min(lows)), stop) * 0.965
     y_max_val = max(float(np.max(highs)), tp1 * 1.02, min(tp3, float(np.max(highs)) * 1.24)) * 1.035
 
-    # Stop, Breakout Entry & Target lines extending across right portion of chart
+    # Stop, Pre-Breakout Entry (below BO) & Target lines extending across right portion of chart
     x_lvl_start = max(0, (min(base_xs) - 1) if base_xs else (n - 12))
     ax_price.hlines(stop, x_lvl_start, n + 0.3, colors=STOP_COL, linestyles="--", lw=1.1, alpha=0.92, zorder=3)
-    ax_price.hlines(entry_bo, x_lvl_start, n + 0.3, colors="#38bdf8", linestyles="-.", lw=1.0, alpha=0.88, zorder=3)
+    ax_price.hlines(entry_price, x_lvl_start, n + 0.3, colors="#38bdf8", linestyles="-.", lw=1.1, alpha=0.92, zorder=3)
     ax_price.hlines(tp1, x_lvl_start, n + 0.3, colors=TGT_COL, linestyles="--", lw=1.0, alpha=0.88, zorder=3)
 
     # Collect right-margin labels and nudge slightly if two levels are very close vertically
     right_labels = [
         (stop, f"SL {stop:.2f}", STOP_COL),
-        (entry_bo, f"BO {entry_bo:.2f}", "#38bdf8"),
+        (entry_price, f"ENT {entry_price:.1f}", "#38bdf8"),
         (tp1, f"TP1 {tp1:.1f}", TGT_COL),
     ]
     if tp2 <= y_max_val * 0.985:
@@ -363,7 +364,7 @@ def generate_pattern_chart(
         title_col = TEXT_MAIN
         subtitle = (
             f"{setup.get('company_name', symbol)}  •  As of {setup['scan_date']}  •  "
-            f"Entry > ₹{entry_bo:.2f}  |  SL ₹{stop:.2f} (-{setup.get('sl_buffer_pct', 0.5):.1f}% flag)  |  "
+            f"Entry ₹{entry_price:.2f} (<BO ₹{bo_lvl:.1f})  |  SL ₹{stop:.2f} (-{setup.get('sl_buffer_pct', 0.5):.1f}% flag)  |  "
             f"TP1 ₹{tp1:.1f}  |  TP2 ₹{tp2:.1f}  |  TP3 ₹{tp3:.1f}"
         )
 

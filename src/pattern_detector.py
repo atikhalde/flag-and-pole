@@ -70,7 +70,12 @@ class DailyPatternSetup:
     lvn_zone: Optional[List[float]]
     has_unfilled_lvn: bool
     above_vah: bool
-    # Trade Plan Levels (Full Plan: Entry, SL = 0.5% below flag low, TP1, TP2, TP3)
+    # Trade Plan Levels (Pre-Breakout Entry strictly BELOW breakout level, SL = 0.5% below flag low, TP1/TP2/TP3)
+    breakout_level: float
+    entry_price: float
+    entry_zone_low: float
+    entry_zone_high: float
+    entry_below_bo_pct: float
     entry_breakout: float
     entry_anticipatory: float
     invalidation_stop: float
@@ -81,6 +86,7 @@ class DailyPatternSetup:
     tp1_pct: float
     tp2_pct: float
     tp3_pct: float
+    risk_pct: float
     risk_pct_anticipatory: float
     risk_pct_breakout: float
     rr_to_tp1: float
@@ -441,52 +447,86 @@ def detect_daily_pattern(
                 pat_label = "Post-Pole Tight Flag"
 
             # Actionable Full Structural Trade Plan:
-            #   Entry (BO) = shelf_high + entry_breakout_buffer_pct (default 0.3%)
-            #   SL         = shelf_low  - sl_buffer_pct (default 0.5% below flag low!)
-            #   TP1 / TP2 / TP3 = clean Flag-and-Pole R-multiples + Pole Measured Move
+            #   Breakout Level = shelf_high (flag ceiling)
+            #   Entry          = Pre-breakout anticipatory entry STRICTLY BELOW breakout level
+            #   SL             = shelf_low - sl_buffer_pct (default 0.5% below flag low!)
+            #   TP1 / TP2 / TP3 = Structural Breakout/Pole targets + R-multiples above breakout level
             tp_cfg = cfg.get("trade_plan", {})
-            bo_buf_pct = float(tp_cfg.get("entry_breakout_buffer_pct", 0.3))
+            below_bo_min_pct = float(tp_cfg.get("entry_below_bo_min_pct", 0.8))
+            low_frac = float(tp_cfg.get("entry_flag_low_frac", 0.15))
+            high_frac = float(tp_cfg.get("entry_flag_high_frac", 0.72))
             sl_buf_pct = float(tp_cfg.get("sl_buffer_pct", 0.5))
-            tp1_r = float(tp_cfg.get("tp1_r_multiple", 1.0))
-            tp2_r = float(tp_cfg.get("tp2_r_multiple", 2.0))
-            tp3_r = float(tp_cfg.get("tp3_r_multiple", 3.0))
+            tp1_r = float(tp_cfg.get("tp1_r_multiple", 1.5))
+            tp2_r = float(tp_cfg.get("tp2_r_multiple", 3.0))
+            tp3_r = float(tp_cfg.get("tp3_r_multiple", 4.5))
             use_tick = bool(tp_cfg.get("round_to_nse_tick", True))
 
-            entry_bo = _round_price(shelf_high * (1.0 + bo_buf_pct / 100.0), use_tick)
-            entry_ant = _round_price(last_close, use_tick)
+            box_w = max(shelf_high - shelf_low, shelf_high * 0.02)
+            bo_lvl = _round_price(shelf_high, use_tick)
             stop = _round_price(shelf_low * (1.0 - sl_buf_pct / 100.0), use_tick)
 
-            risk_bo = max(entry_bo - stop, entry_bo * 0.015)
-            risk_pct_ant = round((entry_ant - stop) / entry_ant * 100.0, 2)
-            risk_pct_bo = round((entry_bo - stop) / entry_bo * 100.0, 2)
+            # Entry zone strictly inside the flag shelf and below breakout level
+            raw_zone_low = max(shelf_low * 1.003, shelf_low + low_frac * box_w)
+            raw_zone_high = min(shelf_high * (1.0 - below_bo_min_pct / 100.0), shelf_low + high_frac * box_w)
+            if raw_zone_high <= raw_zone_low:
+                raw_zone_low = shelf_low * 1.003
+                raw_zone_high = shelf_high * (1.0 - below_bo_min_pct / 100.0)
+            # Allow lower edge to capture CMP if CMP sits calmly near flag support
+            if shelf_low * 1.002 <= last_close < raw_zone_low:
+                raw_zone_low = last_close
 
-            pole_height = max(pole_high - float(pre_close), risk_bo * 1.5)
-            # TP1: max(Pole High BOS, Entry_BO + 1.0R)
-            raw_tp1 = max(pole_high if pole_high >= entry_bo * 1.025 else 0.0, entry_bo + tp1_r * risk_bo)
-            # TP2: max(TP1 + 1.0R, 0.618x Pole Measured Move from flag low, Entry_BO + 2.0R)
-            raw_tp2 = max(
-                raw_tp1 + risk_bo,
-                entry_bo + tp2_r * risk_bo,
-                shelf_low + 0.618 * pole_height,
+            entry_zone_low = _round_price(raw_zone_low, use_tick)
+            entry_zone_high = _round_price(raw_zone_high, use_tick)
+            if entry_zone_high >= bo_lvl:
+                entry_zone_high = _round_price(bo_lvl * (1.0 - below_bo_min_pct / 100.0), use_tick)
+
+            # Primary Pre-Breakout Entry: CMP if inside/below zone cap, else pullback cap strictly below BO
+            entry_price = _round_price(min(max(last_close, entry_zone_low), entry_zone_high), use_tick)
+            if entry_price >= bo_lvl:
+                entry_price = _round_price(bo_lvl * (1.0 - below_bo_min_pct / 100.0), use_tick)
+
+            entry_below_bo_pct = round((bo_lvl - entry_price) / bo_lvl * 100.0, 2)
+            entry_bo = bo_lvl
+            entry_ant = entry_price
+
+            risk_amt = max(entry_price - stop, entry_price * 0.01)
+            risk_pct = round((entry_price - stop) / entry_price * 100.0, 2)
+            risk_pct_ant = risk_pct
+            risk_pct_bo = round((bo_lvl - stop) / bo_lvl * 100.0, 2)
+
+            pole_height = max(pole_high - float(pre_close), box_w * 1.8)
+            step_unit = max(risk_amt, box_w * 0.85, entry_price * 0.04)
+
+            # TP1: cleanly above Breakout / Pole High and >= tp1_r
+            raw_tp1 = max(
+                pole_high if pole_high >= bo_lvl * 1.02 else bo_lvl * 1.03,
+                bo_lvl + 0.5 * box_w,
+                entry_price + tp1_r * risk_amt,
             )
-            # TP3: max(TP2 + 1.0R, Full 1.0x Pole Measured Move from flag low, Entry_BO + 3.0R)
+            # TP2: Swing extension / 0.618x Pole Measured Move
+            raw_tp2 = max(
+                raw_tp1 + step_unit,
+                shelf_low + 0.618 * pole_height,
+                entry_price + tp2_r * risk_amt,
+            )
+            # TP3: Full 1.0x Flag-and-Pole Measured Move
             raw_tp3 = max(
-                raw_tp2 + risk_bo,
-                entry_bo + tp3_r * risk_bo,
+                raw_tp2 + step_unit,
                 shelf_low + 1.00 * pole_height,
+                entry_price + tp3_r * risk_amt,
             )
 
             tp1 = _round_price(raw_tp1, use_tick)
             tp2 = _round_price(raw_tp2, use_tick)
             tp3 = _round_price(raw_tp3, use_tick)
 
-            tp1_pct = round((tp1 - entry_bo) / entry_bo * 100.0, 1)
-            tp2_pct = round((tp2 - entry_bo) / entry_bo * 100.0, 1)
-            tp3_pct = round((tp3 - entry_bo) / entry_bo * 100.0, 1)
+            tp1_pct = round((tp1 - entry_price) / entry_price * 100.0, 1)
+            tp2_pct = round((tp2 - entry_price) / entry_price * 100.0, 1)
+            tp3_pct = round((tp3 - entry_price) / entry_price * 100.0, 1)
 
-            rr_tp1 = round((tp1 - entry_bo) / risk_bo, 2)
-            rr_tp2 = round((tp2 - entry_bo) / risk_bo, 2)
-            rr_tp3 = round((tp3 - entry_bo) / risk_bo, 2)
+            rr_tp1 = round((tp1 - entry_price) / risk_amt, 2)
+            rr_tp2 = round((tp2 - entry_price) / risk_amt, 2)
+            rr_tp3 = round((tp3 - entry_price) / risk_amt, 2)
 
             setup = DailyPatternSetup(
                 symbol=symbol,
@@ -542,6 +582,11 @@ def detect_daily_pattern(
                 lvn_zone=[round(float(vp.lvn_zone[0]), 2), round(float(vp.lvn_zone[1]), 2)] if (vp and vp.lvn_zone) else None,
                 has_unfilled_lvn=bool(vp.has_unfilled_lvn) if vp else False,
                 above_vah=bool(above_vah),
+                breakout_level=bo_lvl,
+                entry_price=entry_price,
+                entry_zone_low=entry_zone_low,
+                entry_zone_high=entry_zone_high,
+                entry_below_bo_pct=entry_below_bo_pct,
                 entry_breakout=entry_bo,
                 entry_anticipatory=entry_ant,
                 invalidation_stop=stop,
@@ -552,6 +597,7 @@ def detect_daily_pattern(
                 tp1_pct=tp1_pct,
                 tp2_pct=tp2_pct,
                 tp3_pct=tp3_pct,
+                risk_pct=risk_pct,
                 risk_pct_anticipatory=risk_pct_ant,
                 risk_pct_breakout=risk_pct_bo,
                 rr_to_tp1=rr_tp1,

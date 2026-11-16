@@ -48,7 +48,11 @@ class LiveTriggerEvent:
     shelf_low: float
     vah: Optional[float]
     poc: Optional[float]
-    # Full Trade Plan (Entry, SL = 0.5% below flag low, TP1, TP2, TP3)
+    # Full Trade Plan (Pre-Breakout Entry below BO, SL = 0.5% below flag low, TP1, TP2, TP3)
+    breakout_level: float
+    entry_price: float
+    entry_zone_low: float
+    entry_zone_high: float
     entry_breakout: float
     invalidation_stop: float
     sl_buffer_pct: float
@@ -138,16 +142,20 @@ def evaluate_live_daily_triggers(
 
     tp_cfg = cfg.get("trade_plan", {})
     sl_buf_pct = float(candidate.get("sl_buffer_pct", tp_cfg.get("sl_buffer_pct", 0.5)))
-    entry_bo = float(candidate.get("entry_breakout", round(shelf_high * 1.003, 2)))
+    bo_lvl = float(candidate.get("breakout_level", round(shelf_high, 2)))
+    entry_zone_low = float(candidate.get("entry_zone_low", round(shelf_low * 1.005, 2)))
+    entry_zone_high = float(candidate.get("entry_zone_high", round(shelf_high * 0.992, 2)))
+    entry_price = float(candidate.get("entry_price", min(float(candidate.get("last_close", entry_zone_high)), entry_zone_high)))
+    entry_bo = float(candidate.get("entry_breakout", bo_lvl))
     # Always enforce SL = 0.5% below flag low (shelf_low)
     stop = round(round((shelf_low * (1.0 - sl_buf_pct / 100.0)) * 20.0) / 20.0, 2)
     if "invalidation_stop" in candidate:
         stop = float(candidate["invalidation_stop"])
 
-    risk_bo = max(entry_bo - stop, entry_bo * 0.015)
-    tp1 = float(candidate.get("tp1", candidate.get("target_1_bos", round(entry_bo + risk_bo, 2))))
-    tp2 = float(candidate.get("tp2", candidate.get("target_2_ext", round(tp1 + risk_bo, 2))))
-    tp3 = float(candidate.get("tp3", round(tp2 + risk_bo, 2)))
+    risk_ref = max(entry_price - stop, entry_price * 0.015)
+    tp1 = float(candidate.get("tp1", candidate.get("target_1_bos", round(bo_lvl * 1.03, 2))))
+    tp2 = float(candidate.get("tp2", candidate.get("target_2_ext", round(tp1 + risk_ref, 2))))
+    tp3 = float(candidate.get("tp3", round(tp2 + risk_ref, 2)))
 
     # Live Risk & R:R calculated cleanly from current LTP vs SL
     live_risk_amt = max(live_price - stop, live_price * 0.01)
@@ -189,6 +197,10 @@ def evaluate_live_daily_triggers(
             shelf_low=shelf_low,
             vah=vah,
             poc=poc,
+            breakout_level=bo_lvl,
+            entry_price=entry_price,
+            entry_zone_low=entry_zone_low,
+            entry_zone_high=entry_zone_high,
             entry_breakout=entry_bo,
             invalidation_stop=stop,
             sl_buffer_pct=sl_buf_pct,

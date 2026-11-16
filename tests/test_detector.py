@@ -64,11 +64,14 @@ class TestDailyFlagScanner(unittest.TestCase):
         self.assertLessEqual(setup.total_pattern_days, 20)
         self.assertGreaterEqual(setup.total_score, 75.0)
         self.assertGreaterEqual(setup.dryup_pct, 85.0)
-        # Verify exact 0.5% below flag low stop loss & ascending TP1 < TP2 < TP3
+        # Verify Pre-Breakout Entry is strictly BELOW breakout level, exact 0.5% below flag low SL, & TP1 < TP2 < TP3
         expected_sl = round(round((setup.shelf_low * 0.995) * 20.0) / 20.0, 2)
         self.assertEqual(setup.invalidation_stop, expected_sl)
         self.assertLess(setup.invalidation_stop, setup.shelf_low)
-        self.assertLess(setup.entry_breakout, setup.tp1)
+        self.assertLess(setup.entry_price, setup.breakout_level)
+        self.assertLessEqual(setup.entry_zone_high, setup.breakout_level)
+        self.assertGreater(setup.entry_price, setup.invalidation_stop)
+        self.assertLess(setup.breakout_level, setup.tp1)
         self.assertLess(setup.tp1, setup.tp2)
         self.assertLess(setup.tp2, setup.tp3)
 
