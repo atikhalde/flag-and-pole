@@ -214,6 +214,7 @@ def run_eod_scan(
     candidates_payload = [m[0].to_dict() for m in matched]
 
     state_obj = {
+        "version": "V2.1 Core + Coil",
         "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
         "scan_date": scan_date,
         "universe_scanned": len(daily_map),

@@ -301,7 +301,7 @@ class TelegramNotifier:
             f"{icon} <b>LIVE {label}: <a href='{tv}'>{sym}</a></b> ({name})\n"
             f"🕒 {html.escape(ev['timestamp_ist'])} | Day <b>{ev['day_of_pattern']}/20</b> | Grade <b>{ev['setup_grade']} ({ev['setup_score']:.0f})</b>\n"
             f"💹 LTP <b>₹{ev['live_price']:.2f}</b> ({chg_sign}{ev['day_chg_pct']:.2f}%) | RVOL <b>{ev['projected_rvol_vs_base']:.1f}x</b> | CLV <b>{ev['daily_clv']:.0%}</b>\n\n"
-            f"🎯 <b>V2 TRADE PLAN:</b>\n"
+            f"🎯 <b>V2.1 TRADE PLAN:</b>\n"
             f"{entry_line}\n"
             f"{sl_lines}"
             f"{_fmt_tp('TP1', ev['tp1'], ev['tp1_pct'], 'Book 45% → BE')}\n"

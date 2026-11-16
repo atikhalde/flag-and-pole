@@ -89,7 +89,13 @@ def run_live_scan(
         return {"skipped": True, "reason": "nse_breadth_paused", "nifty_regime": regime, "nse_breadth50": saved_breadth}
 
     saved_br_pct = saved_breadth.get("breadth50_pct") if saved_breadth.get("enforced") else None
-    candidates: List[Dict[str, Any]] = list(wl_state.get("candidates", []))
+    raw_candidates: List[Dict[str, Any]] = list(wl_state.get("candidates", []))
+    # Skip any stale pre-V2.1 candidates missing Option A / V2.1 schema fields
+    candidates: List[Dict[str, Any]] = [
+        c for c in raw_candidates if isinstance(c, dict) and c.get("sl_mode") and "above_150sma" in c
+    ]
+    if len(candidates) < len(raw_candidates):
+        logger.info("Filtered out %d legacy pre-V2.1 candidate(s) from coiled_candidates.json.", len(raw_candidates) - len(candidates))
     cand_map: Dict[str, Dict[str, Any]] = {c["symbol"]: c for c in candidates}
 
     # Merge custom watchlist symbols so they are always monitored live
@@ -113,11 +119,12 @@ def run_live_scan(
     )
 
     # For custom watchlist symbols not already in coiled_candidates.json, evaluate prior-day V2.1 daily pattern
+    min_wl_score = float(cfg["scoring"]["min_watchlist_score"])
     for sym in custom_syms:
         if sym not in cand_map and sym in daily_map and len(daily_map[sym]) >= 50:
             df_prior = daily_map[sym].iloc[:-1]
             setup, _ = detect_daily_pattern(sym, sym, df_prior, cfg, nifty_df=nifty_df, breadth50_pct=saved_br_pct)
-            if setup is not None:
+            if setup is not None and setup.total_score >= min_wl_score:
                 cand_map[sym] = setup.to_dict()
 
     # Load strict permanent symbol-level deduplication ledger (NEVER resets across scans or days)
@@ -186,7 +193,7 @@ def run_live_scan(
         ledger.save()
 
     logger.info(
-        "Stage-2 V2 Live Scan done in %.1fs | Monitored=%d | New Triggers=%d | SkippedDup=%d",
+        "Stage-2 V2.1 Live Scan done in %.1fs | Monitored=%d | New Triggers=%d | SkippedDup=%d",
         time.time() - t0,
         len(cand_map),
         len(fired),
