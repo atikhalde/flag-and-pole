@@ -1,15 +1,68 @@
 {
-  "session_date": "2026-11-17",
-  "alerts": {
-    "POONAWALLA:SPRING_RETEST": {
-      "timestamp_ist": "2026-11-17 01:58 IST",
-      "price": 490.5,
-      "rvol": 0.71
+  "policy": "strict_never_repeat_symbol",
+  "total_alerted_symbols": 8,
+  "alerted_symbols": {
+    "AFFLE": {
+      "stage": "EOD",
+      "alert_type": "PRE_BREAKOUT",
+      "price": 1576.6,
+      "timestamp_ist": "2026-11-17 02:10 IST",
+      "scan_date": "2026-11-16",
+      "score": 88.6
     },
-    "BOROLTD:GAP_AND_GO": {
+    "APLLTD": {
+      "stage": "EOD",
+      "alert_type": "PRE_BREAKOUT",
+      "price": 1058.65,
+      "timestamp_ist": "2026-11-17 02:10 IST",
+      "scan_date": "2026-11-16",
+      "score": 72.1
+    },
+    "BOROLTD": {
       "timestamp_ist": "2026-11-17 01:58 IST",
       "price": 341.1,
-      "rvol": 23.76
+      "rvol": 23.76,
+      "stage": "LEGACY",
+      "alert_type": "GAP_AND_GO"
+    },
+    "ENTERO": {
+      "stage": "EOD",
+      "alert_type": "PRE_BREAKOUT",
+      "price": 1967.0,
+      "timestamp_ist": "2026-11-17 02:10 IST",
+      "scan_date": "2026-11-16",
+      "score": 77.4
+    },
+    "IXIGO": {
+      "stage": "EOD",
+      "alert_type": "PRE_BREAKOUT",
+      "price": 165.4,
+      "timestamp_ist": "2026-11-17 02:10 IST",
+      "scan_date": "2026-11-16",
+      "score": 81.6
+    },
+    "POONAWALLA": {
+      "timestamp_ist": "2026-11-17 01:58 IST",
+      "price": 490.5,
+      "rvol": 0.71,
+      "stage": "LEGACY",
+      "alert_type": "SPRING_RETEST"
+    },
+    "RAMKY": {
+      "stage": "EOD",
+      "alert_type": "PRE_BREAKOUT",
+      "price": 387.1,
+      "timestamp_ist": "2026-11-17 02:10 IST",
+      "scan_date": "2026-11-16",
+      "score": 83.2
+    },
+    "REPCOHOME": {
+      "stage": "EOD",
+      "alert_type": "PRE_BREAKOUT",
+      "price": 385.2,
+      "timestamp_ist": "2026-11-17 02:10 IST",
+      "scan_date": "2026-11-16",
+      "score": 77.7
     }
   }
 }

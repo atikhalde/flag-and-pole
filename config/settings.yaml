@@ -81,5 +81,8 @@ live_triggers:
 telegram:
   enabled: true
   send_charts: true
-  send_eod_summary_even_if_empty: true
+  send_eod_summary_even_if_empty: false   # Stay silent when 0 brand-new unalerted stocks exist
   tradingview_url_template: "https://www.tradingview.com/chart/?symbol=NSE%3A{symbol}"
+
+deduplication:
+  strict_never_repeat_symbol: true        # Strictly NEVER repeat the same stock symbol alert across any scan/stage/day

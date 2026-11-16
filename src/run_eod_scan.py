@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
+from src.alert_ledger import AlertLedger
 from src.chart_generator import generate_pattern_chart
 from src.config_loader import load_config
 from src.data_fetcher import fetch_daily_batch, fetch_daily_single
@@ -121,10 +122,31 @@ def run_eod_scan(
     state_file.write_text(json.dumps(state_obj, indent=2), encoding="utf-8")
     logger.info("Saved %d qualified coiled candidates to %s", len(candidates_payload), state_file)
 
-    # Filter setups that meet EOD Telegram alert threshold
+    # Filter setups that meet EOD Telegram alert threshold AND have NEVER been alerted before
     min_alert_score = float(s_cfg["min_eod_alert_score"])
-    alert_items = [m for m in matched if m[0].total_score >= min_alert_score]
+    eligible_items = [m for m in matched if m[0].total_score >= min_alert_score]
     max_charts = int(s_cfg["max_eod_chart_alerts"])
+
+    strict_dedup = bool(cfg.get("deduplication", {}).get("strict_never_repeat_symbol", True))
+    ledger = AlertLedger(state_dir / "sent_alerts.json")
+
+    alert_items = []
+    skipped_already_sent: List[str] = []
+    seen_this_run: set[str] = set()
+    for item in eligible_items:
+        sym_key = item[0].symbol.strip().upper()
+        if sym_key in seen_this_run or (strict_dedup and ledger.is_sent(sym_key)):
+            skipped_already_sent.append(sym_key)
+            continue
+        seen_this_run.add(sym_key)
+        alert_items.append(item)
+
+    if skipped_already_sent:
+        logger.info(
+            "Strict dedup skipped %d already-alerted symbol(s): %s",
+            len(skipped_already_sent),
+            ", ".join(skipped_already_sent),
+        )
 
     notifier = TelegramNotifier(
         bot_token=cfg["runtime"]["telegram_bot_token"],
@@ -134,13 +156,15 @@ def run_eod_scan(
         extra_targets=cfg["runtime"].get("telegram_extra_targets", []),
     )
 
-    if alert_items or bool(t_cfg.get("send_eod_summary_even_if_empty", True)):
+    if alert_items or bool(t_cfg.get("send_eod_summary_even_if_empty", False)):
         digest_html = notifier.format_eod_digest(scan_date, len(daily_map), [m[0].to_dict() for m in alert_items])
         notifier.send_message(digest_html)
 
     charts_dir = Path(cfg["runtime"]["charts_dir"])
     charts_dir.mkdir(parents=True, exist_ok=True)
     charts_generated: List[str] = []
+    newly_alerted: List[str] = []
+    ts_ist = now.strftime("%Y-%m-%d %H:%M IST")
 
     for setup, vp, df_d in alert_items[:max_charts]:
         setup_dict = setup.to_dict()
@@ -155,17 +179,32 @@ def run_eod_scan(
             )
             charts_generated.append(str(chart_path))
             caption = notifier.format_eod_setup_caption(setup_dict)
-            notifier.send_photo(chart_path, caption)
+            delivered = notifier.send_photo(chart_path, caption)
         else:
-            notifier.send_message(notifier.format_eod_setup_caption(setup_dict))
+            delivered = notifier.send_message(notifier.format_eod_setup_caption(setup_dict))
+
+        if not dry_run and delivered:
+            ledger.mark_sent(
+                symbol=setup.symbol,
+                stage="EOD",
+                alert_type="PRE_BREAKOUT",
+                price=setup.entry_price,
+                timestamp_ist=ts_ist,
+                extra={"scan_date": scan_date, "score": setup.total_score, "pole_start_date": setup.pole_start_date},
+            )
+            newly_alerted.append(setup.symbol)
+
+    if not dry_run:
+        ledger.save()
 
     elapsed = time.time() - t0
     logger.info(
-        "Stage-1 EOD Scan complete in %.1fs | Scanned=%d | Watchlist=%d | Alerted=%d | Charts=%d",
+        "Stage-1 EOD Scan complete in %.1fs | Scanned=%d | Watchlist=%d | NewAlerts=%d | SkippedDup=%d | Charts=%d",
         elapsed,
         len(daily_map),
         len(candidates_payload),
-        len(alert_items),
+        len(newly_alerted),
+        len(skipped_already_sent),
         len(charts_generated),
     )
     return {
@@ -174,6 +213,8 @@ def run_eod_scan(
         "universe_scanned": len(daily_map),
         "watchlist_count": len(candidates_payload),
         "alert_count": len(alert_items),
+        "newly_alerted": newly_alerted,
+        "skipped_already_sent": skipped_already_sent,
         "top_symbols": [c["symbol"] for c in candidates_payload[:10]],
         "charts_generated": charts_generated,
     }

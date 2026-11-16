@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from src.alert_ledger import AlertLedger
 from src.chart_generator import generate_pattern_chart
 from src.config_loader import load_config
 from src.data_fetcher import fetch_daily_batch
@@ -90,11 +91,9 @@ def run_live_scan(
             if setup is not None:
                 cand_map[sym] = setup.to_dict()
 
-    # Load daily deduplication ledger (resets automatically each NSE session date)
-    today_str = now.strftime("%Y-%m-%d")
-    sent_state = _load_json(alerts_file, {"session_date": today_str, "alerts": {}})
-    if sent_state.get("session_date") != today_str:
-        sent_state = {"session_date": today_str, "alerts": {}}
+    # Load strict permanent symbol-level deduplication ledger (NEVER resets across scans or days)
+    strict_dedup = bool(cfg.get("deduplication", {}).get("strict_never_repeat_symbol", True))
+    ledger = AlertLedger(alerts_file)
 
     notifier = TelegramNotifier(
         bot_token=cfg["runtime"]["telegram_bot_token"],
@@ -107,8 +106,15 @@ def run_live_scan(
     charts_dir = Path(cfg["runtime"]["charts_dir"])
     charts_dir.mkdir(parents=True, exist_ok=True)
     fired: List[Dict[str, Any]] = []
+    skipped_already_sent: List[str] = []
+    seen_this_run: set[str] = set()
 
     for sym, cand in cand_map.items():
+        sym_key = sym.strip().upper()
+        if sym_key in seen_this_run or (strict_dedup and ledger.is_sent(sym_key)):
+            skipped_already_sent.append(sym_key)
+            continue
+
         df_d = daily_map.get(sym)
         if df_d is None or len(df_d) < 5:
             continue
@@ -119,10 +125,7 @@ def run_live_scan(
 
         # Take highest-priority trigger for this stock
         ev = events[0]
-        dedup_key = f"{sym}:{ev.trigger_type}"
-        if dedup_key in sent_state["alerts"]:
-            logger.info("Skipping duplicate live alert %s (already sent today).", dedup_key)
-            continue
+        seen_this_run.add(sym_key)
 
         ev_dict = ev.to_dict()
         chart_path = charts_dir / f"LIVE_{sym}_{ev.trigger_type}_{ev.session_date}.png"
@@ -136,30 +139,37 @@ def run_live_scan(
                 output_path=chart_path,
                 live_trigger=ev_dict,
             )
-            notifier.send_photo(chart_path, caption)
+            delivered = notifier.send_photo(chart_path, caption)
         else:
-            notifier.send_message(caption)
+            delivered = notifier.send_message(caption)
 
-        sent_state["alerts"][dedup_key] = {
-            "timestamp_ist": ev.timestamp_ist,
-            "price": ev.live_price,
-            "rvol": ev.projected_rvol_vs_base,
-        }
+        if not dry_run and delivered:
+            ledger.mark_sent(
+                symbol=sym_key,
+                stage="LIVE",
+                alert_type=ev.trigger_type,
+                price=ev.live_price,
+                timestamp_ist=ev.timestamp_ist,
+                extra={"rvol": ev.projected_rvol_vs_base, "session_date": ev.session_date},
+            )
         fired.append(ev_dict)
 
-    alerts_file.write_text(json.dumps(sent_state, indent=2), encoding="utf-8")
+    if not dry_run:
+        ledger.save()
 
     logger.info(
-        "Stage-2 Live Scan done in %.1fs | Monitored=%d | New Triggers=%d",
+        "Stage-2 Live Scan done in %.1fs | Monitored=%d | New Triggers=%d | SkippedDup=%d",
         time.time() - t0,
         len(cand_map),
         len(fired),
+        len(skipped_already_sent),
     )
     return {
         "skipped": False,
         "timestamp_ist": now.strftime("%Y-%m-%d %H:%M IST"),
         "monitored": len(cand_map),
         "triggers_fired": len(fired),
+        "skipped_already_sent": skipped_already_sent,
         "events": [{"symbol": e["symbol"], "trigger": e["trigger_type"], "price": e["live_price"]} for e in fired],
     }
 

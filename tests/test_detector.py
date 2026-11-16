@@ -140,6 +140,32 @@ class TestDailyFlagScanner(unittest.TestCase):
                 else:
                     os.environ[k] = v
 
+    def test_strict_never_repeat_symbol_ledger(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+        from src.alert_ledger import AlertLedger
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "sent_alerts.json"
+            # Seed legacy format to verify automatic migration
+            p.write_text(
+                json.dumps({"session_date": "2026-11-16", "alerts": {"BOROLTD:GAP_AND_GO": {"price": 341.1}}}),
+                encoding="utf-8",
+            )
+            ledger = AlertLedger(p)
+            self.assertTrue(ledger.is_sent("BOROLTD"))
+            self.assertTrue(ledger.is_sent("boroltd"))
+            self.assertFalse(ledger.is_sent("AFFLE"))
+
+            ledger.mark_sent("AFFLE", stage="EOD", alert_type="PRE_BREAKOUT", price=1576.60, timestamp_ist="2026-11-17 02:00 IST")
+
+            # Reload fresh from disk (simulates next scan / next day / different stage)
+            ledger2 = AlertLedger(p)
+            self.assertTrue(ledger2.is_sent("AFFLE"))
+            self.assertTrue(ledger2.is_sent("BOROLTD"))
+            self.assertFalse(ledger2.is_sent("RAMKY"))
+
 
 if __name__ == "__main__":
     unittest.main()

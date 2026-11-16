@@ -57,15 +57,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Commit updated coiled watchlist state
+      - name: Commit updated coiled watchlist & alert ledger
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/coiled_candidates.json
+          git add state/coiled_candidates.json state/sent_alerts.json
           if git diff --staged --quiet; then
             echo "No state changes to commit."
           else
-            git commit -m "chore(eod): update coiled <=20d watchlist [skip ci]"
+            git commit -m "chore(eod): update coiled watchlist & sent alerts ledger [skip ci]"
             git pull --rebase origin "${{ github.ref_name }}"
             git push origin "HEAD:${{ github.ref_name }}"
           fi
