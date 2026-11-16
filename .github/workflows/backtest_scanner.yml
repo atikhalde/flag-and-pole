@@ -1,0 +1,90 @@
+name: Stage 3 - Historical Flag-and-Pole Backtest (PDF Report)
+
+on:
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "Historical lookback period (6mo, 1y, 2y, 3y, 5y)"
+        required: false
+        default: "2y"
+        type: choice
+        options:
+          - "6mo"
+          - "1y"
+          - "2y"
+          - "3y"
+          - "5y"
+      max_symbols:
+        description: "Number of NSE stocks to backtest (0 = ALL ~2,403 NSE EQ stocks)"
+        required: false
+        default: "0"
+        type: string
+      min_score:
+        description: "Minimum scanner score (68 = Grade A/A+, 82 = Grade A+ only)"
+        required: false
+        default: "68"
+        type: string
+      symbols:
+        description: "Optional comma-separated specific stocks (leave blank for NSE universe, e.g. BOROLTD,AFFLE)"
+        required: false
+        default: ""
+        type: string
+      send_telegram:
+        description: "Send generated PDF report directly to your Telegram bots"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backtest-flag-scan
+  cancel-in-progress: false
+
+jobs:
+  backtest-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Historical Backtest & Generate PDF Report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN_2: ${{ secrets.TELEGRAM_BOT_TOKEN_2 }}
+          TELEGRAM_CHAT_ID_2: ${{ secrets.TELEGRAM_CHAT_ID_2 }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          ARGS="--period ${{ inputs.period || '2y' }} --limit ${{ inputs.max_symbols || '0' }} --min-score ${{ inputs.min_score || '68' }}"
+          if [ -n "${{ inputs.symbols }}" ]; then
+            ARGS="$ARGS --symbols ${{ inputs.symbols }}"
+          fi
+          if [ "${{ inputs.send_telegram }}" = "true" ]; then
+            ARGS="$ARGS --send-telegram"
+          fi
+          python -m src.run_backtest $ARGS
+
+      - name: Upload Backtest PDF Report & Trades CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flag-pole-backtest-pdf-${{ github.run_id }}
+          path: |
+            output/backtest/*.pdf
+            output/backtest/*.csv
+          if-no-files-found: warn
+          retention-days: 30

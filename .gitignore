@@ -5,7 +5,10 @@ __pycache__/
 venv/
 .env
 output/charts/*.png
+output/backtest/*.pdf
+output/backtest/*.csv
 !output/charts/.gitkeep
+!output/backtest/.gitkeep
 .pytest_cache/
 *.log
 .DS_Store

@@ -166,6 +166,56 @@ class TestDailyFlagScanner(unittest.TestCase):
             self.assertTrue(ledger2.is_sent("BOROLTD"))
             self.assertFalse(ledger2.is_sent("RAMKY"))
 
+    def test_backtester_and_pdf_report_generation(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from src.backtester import backtest_single_symbol, compute_backtest_summary
+        from src.pdf_report import generate_backtest_pdf
+
+        df_base = _make_synthetic_flag_df(base_days=8)
+        # Append 10 post-breakout bars driving smoothly through BO, TP1, TP2, TP3
+        last_dt = df_base.index[-1]
+        fut_dates = pd.bdate_range(last_dt + pd.Timedelta(days=1), periods=10)
+        fut_rows = []
+        px = 314.0
+        for i in range(10):
+            o = px
+            h = px + 14.0
+            l = px - 2.0
+            c = px + 11.0
+            fut_rows.append((o, h, l, c, 2_500_000.0))
+            px = c
+        df_fut = pd.DataFrame(fut_rows, index=fut_dates, columns=["Open", "High", "Low", "Close", "Volume"])
+        df_all = pd.concat([df_base, df_fut])
+
+        trades = backtest_single_symbol("SYNTH", "Synthetic Flag Ltd", df_all, self.cfg, min_score=65.0)
+        self.assertGreaterEqual(len(trades), 1)
+        tr = trades[0]
+        self.assertNotEqual(tr.pole_start_date, "-")
+        self.assertNotEqual(tr.entry_date, "-")
+        self.assertNotEqual(tr.breakout_date, "-")
+        self.assertNotEqual(tr.tp1_date, "-")
+        self.assertNotEqual(tr.tp2_date, "-")
+        self.assertNotEqual(tr.tp3_date, "-")
+        self.assertEqual(tr.outcome, "TP3_HIT")
+        self.assertGreater(tr.return_pct, 10.0)
+
+        summary = compute_backtest_summary(trades)
+        self.assertEqual(summary["total_trades"], len(trades))
+        self.assertEqual(summary["tp3_hits"], len(trades))
+
+        with tempfile.TemporaryDirectory() as td:
+            pdf_out = Path(td) / "test_backtest.pdf"
+            generate_backtest_pdf(
+                trades=trades,
+                summary=summary,
+                meta={"period": "1y", "universe_scanned": 1, "min_score": 65, "date_from": "2026-01-01", "date_to": "2026-11-16"},
+                output_pdf_path=pdf_out,
+                daily_map={"SYNTH": df_all},
+            )
+            self.assertTrue(pdf_out.exists())
+            self.assertGreater(pdf_out.stat().st_size, 15_000)
+
 
 if __name__ == "__main__":
     unittest.main()

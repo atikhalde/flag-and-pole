@@ -112,6 +112,50 @@ class TelegramNotifier:
             any_ok = any_ok or sent
         return any_ok
 
+    def send_document(self, file_path: str | Path, caption_html: str = "") -> bool:
+        """Send a PDF/CSV report document to all configured Telegram bots."""
+        if not self.enabled:
+            logger.info("[TELEGRAM DRY-RUN DOCUMENT: %s]\n%s", file_path, caption_html)
+            return False
+
+        p = Path(file_path)
+        if not p.exists():
+            logger.warning("Document missing (%s); cannot send to Telegram.", p)
+            return False
+
+        safe_caption = caption_html[:1020]
+        any_ok = False
+        for idx, (tok, cid) in enumerate(self.targets, start=1):
+            url = f"https://api.telegram.org/bot{tok}/sendDocument"
+            sent = False
+            for attempt in range(3):
+                try:
+                    with open(p, "rb") as fh:
+                        resp = requests.post(
+                            url,
+                            data={
+                                "chat_id": cid,
+                                "caption": safe_caption,
+                                "parse_mode": "HTML",
+                            },
+                            files={"document": (p.name, fh)},
+                            timeout=60,
+                        )
+                    if resp.status_code == 200:
+                        time.sleep(0.5)
+                        sent = True
+                        break
+                    if resp.status_code == 429:
+                        retry_after = int(resp.json().get("parameters", {}).get("retry_after", 3))
+                        time.sleep(retry_after + 1)
+                        continue
+                    logger.warning("Telegram [Bot #%d] sendDocument HTTP %d: %s", idx, resp.status_code, resp.text[:300])
+                except Exception as exc:
+                    logger.warning("Telegram [Bot #%d] sendDocument attempt %d failed: %s", idx, attempt + 1, exc)
+                time.sleep(1.5 * (attempt + 1))
+            any_ok = any_ok or sent
+        return any_ok
+
     def _post_with_retry(self, url: str, data: Dict[str, Any], label: str = "Bot #1") -> bool:
         for attempt in range(3):
             try:
