@@ -64,6 +64,13 @@ class TestDailyFlagScanner(unittest.TestCase):
         self.assertLessEqual(setup.total_pattern_days, 20)
         self.assertGreaterEqual(setup.total_score, 75.0)
         self.assertGreaterEqual(setup.dryup_pct, 85.0)
+        # Verify exact 0.5% below flag low stop loss & ascending TP1 < TP2 < TP3
+        expected_sl = round(round((setup.shelf_low * 0.995) * 20.0) / 20.0, 2)
+        self.assertEqual(setup.invalidation_stop, expected_sl)
+        self.assertLess(setup.invalidation_stop, setup.shelf_low)
+        self.assertLess(setup.entry_breakout, setup.tp1)
+        self.assertLess(setup.tp1, setup.tp2)
+        self.assertLess(setup.tp2, setup.tp3)
 
     def test_rejects_pattern_older_than_20_days(self) -> None:
         df = _make_synthetic_flag_df(base_days=22, pole_days=2)  # 24 total days > 20!

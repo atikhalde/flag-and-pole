@@ -70,16 +70,22 @@ class DailyPatternSetup:
     lvn_zone: Optional[List[float]]
     has_unfilled_lvn: bool
     above_vah: bool
-    # Trade Plan Levels
+    # Trade Plan Levels (Full Plan: Entry, SL = 0.5% below flag low, TP1, TP2, TP3)
     entry_breakout: float
     entry_anticipatory: float
     invalidation_stop: float
-    target_1_bos: float
-    target_2_ext: float
+    sl_buffer_pct: float
+    tp1: float
+    tp2: float
+    tp3: float
+    tp1_pct: float
+    tp2_pct: float
+    tp3_pct: float
     risk_pct_anticipatory: float
     risk_pct_breakout: float
-    rr_to_t1: float
-    rr_to_t2: float
+    rr_to_tp1: float
+    rr_to_tp2: float
+    rr_to_tp3: float
     highlights: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -94,6 +100,12 @@ def _grade(score: float) -> str:
     if score >= 60:
         return "B"
     return "C"
+
+
+def _round_price(val: float, use_nse_tick: bool = True) -> float:
+    if use_nse_tick:
+        return round(round(val * 20.0) / 20.0, 2)
+    return round(val, 2)
 
 
 def detect_daily_pattern(
@@ -428,29 +440,53 @@ def detect_daily_pattern(
             else:
                 pat_label = "Post-Pole Tight Flag"
 
-            # Actionable Structural Trade Plan
-            entry_bo = round(shelf_high * 1.003, 2)
-            entry_ant = round(last_close, 2)
-            stop = round(shelf_low * 0.993, 2)
+            # Actionable Full Structural Trade Plan:
+            #   Entry (BO) = shelf_high + entry_breakout_buffer_pct (default 0.3%)
+            #   SL         = shelf_low  - sl_buffer_pct (default 0.5% below flag low!)
+            #   TP1 / TP2 / TP3 = clean Flag-and-Pole R-multiples + Pole Measured Move
+            tp_cfg = cfg.get("trade_plan", {})
+            bo_buf_pct = float(tp_cfg.get("entry_breakout_buffer_pct", 0.3))
+            sl_buf_pct = float(tp_cfg.get("sl_buffer_pct", 0.5))
+            tp1_r = float(tp_cfg.get("tp1_r_multiple", 1.0))
+            tp2_r = float(tp_cfg.get("tp2_r_multiple", 2.0))
+            tp3_r = float(tp_cfg.get("tp3_r_multiple", 3.0))
+            use_tick = bool(tp_cfg.get("round_to_nse_tick", True))
 
-            risk_ant = max(entry_ant - stop, entry_ant * 0.015)
+            entry_bo = _round_price(shelf_high * (1.0 + bo_buf_pct / 100.0), use_tick)
+            entry_ant = _round_price(last_close, use_tick)
+            stop = _round_price(shelf_low * (1.0 - sl_buf_pct / 100.0), use_tick)
+
             risk_bo = max(entry_bo - stop, entry_bo * 0.015)
             risk_pct_ant = round((entry_ant - stop) / entry_ant * 100.0, 2)
             risk_pct_bo = round((entry_bo - stop) / entry_bo * 100.0, 2)
 
-            target_1 = round(pole_high, 2) if pole_high >= entry_bo * 1.025 else round(entry_bo + 1.5 * risk_bo, 2)
-            shelf_to_bos = max(pole_high - shelf_low, risk_bo * 1.5)
-            target_2 = round(
-                max(
-                    pole_high + 0.50 * shelf_to_bos,
-                    target_1 + 1.25 * risk_bo,
-                    entry_ant + 3.0 * risk_ant,
-                ),
-                2,
+            pole_height = max(pole_high - float(pre_close), risk_bo * 1.5)
+            # TP1: max(Pole High BOS, Entry_BO + 1.0R)
+            raw_tp1 = max(pole_high if pole_high >= entry_bo * 1.025 else 0.0, entry_bo + tp1_r * risk_bo)
+            # TP2: max(TP1 + 1.0R, 0.618x Pole Measured Move from flag low, Entry_BO + 2.0R)
+            raw_tp2 = max(
+                raw_tp1 + risk_bo,
+                entry_bo + tp2_r * risk_bo,
+                shelf_low + 0.618 * pole_height,
+            )
+            # TP3: max(TP2 + 1.0R, Full 1.0x Pole Measured Move from flag low, Entry_BO + 3.0R)
+            raw_tp3 = max(
+                raw_tp2 + risk_bo,
+                entry_bo + tp3_r * risk_bo,
+                shelf_low + 1.00 * pole_height,
             )
 
-            rr_t1 = round((target_1 - entry_ant) / risk_ant, 2)
-            rr_t2 = round((target_2 - entry_ant) / risk_ant, 2)
+            tp1 = _round_price(raw_tp1, use_tick)
+            tp2 = _round_price(raw_tp2, use_tick)
+            tp3 = _round_price(raw_tp3, use_tick)
+
+            tp1_pct = round((tp1 - entry_bo) / entry_bo * 100.0, 1)
+            tp2_pct = round((tp2 - entry_bo) / entry_bo * 100.0, 1)
+            tp3_pct = round((tp3 - entry_bo) / entry_bo * 100.0, 1)
+
+            rr_tp1 = round((tp1 - entry_bo) / risk_bo, 2)
+            rr_tp2 = round((tp2 - entry_bo) / risk_bo, 2)
+            rr_tp3 = round((tp3 - entry_bo) / risk_bo, 2)
 
             setup = DailyPatternSetup(
                 symbol=symbol,
@@ -509,12 +545,18 @@ def detect_daily_pattern(
                 entry_breakout=entry_bo,
                 entry_anticipatory=entry_ant,
                 invalidation_stop=stop,
-                target_1_bos=target_1,
-                target_2_ext=target_2,
+                sl_buffer_pct=sl_buf_pct,
+                tp1=tp1,
+                tp2=tp2,
+                tp3=tp3,
+                tp1_pct=tp1_pct,
+                tp2_pct=tp2_pct,
+                tp3_pct=tp3_pct,
                 risk_pct_anticipatory=risk_pct_ant,
                 risk_pct_breakout=risk_pct_bo,
-                rr_to_t1=rr_t1,
-                rr_to_t2=rr_t2,
+                rr_to_tp1=rr_tp1,
+                rr_to_tp2=rr_tp2,
+                rr_to_tp3=rr_tp3,
                 highlights=highlights,
             )
 

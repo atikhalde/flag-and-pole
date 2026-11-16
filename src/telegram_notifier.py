@@ -130,40 +130,38 @@ class TelegramNotifier:
             badge = "🔥" if c["grade"] == "A+" else ("⚡" if c["grade"] == "A" else "👀")
             lines.append(
                 f"{idx}. {badge} <b><a href='{tv}'>{sym}</a></b> "
-                f"[<b>{c['grade']} • {c['total_score']:.0f}</b>] — ₹{c['last_close']:.2f}\n"
-                f"   • Day <b>{c['total_pattern_days']}/20</b> | Pole <b>+{c['pole_high_gain_pct']:.0f}%</b> ({c['pole_rvol']:.0f}x Vol)\n"
-                f"   • Shelf <b>{c['shelf_close_spread_pct']:.1f}%</b> tight | Dry-Up <b>{c['dryup_pct']:.0f}%</b> | BO &gt; <b>₹{c['entry_breakout']:.2f}</b>"
+                f"[<b>{c['grade']} • {c['total_score']:.0f}</b>] — CMP ₹{c['last_close']:.2f} (Day {c['total_pattern_days']}/20)\n"
+                f"   • Pole <b>+{c['pole_high_gain_pct']:.0f}%</b> ({c['pole_rvol']:.0f}x) | Box <b>{c['shelf_close_spread_pct']:.1f}%</b> | Dry-Up <b>{c['dryup_pct']:.0f}%</b>\n"
+                f"   • 🎯 Entry &gt; <b>₹{c['entry_breakout']:.2f}</b> | SL <b>₹{c['invalidation_stop']:.2f}</b> | "
+                f"TP1 <b>₹{c['tp1']:.2f}</b> | TP2 <b>₹{c['tp2']:.2f}</b> | TP3 <b>₹{c['tp3']:.2f}</b>"
             )
         lines.append("\n<i>Top setups with annotated Daily Charts + Volume Profile follow below 👇</i>")
         return "\n".join(lines)
 
     def format_eod_setup_caption(self, c: Dict[str, Any]) -> str:
         sym = html.escape(c["symbol"])
-        name = html.escape(str(c.get("company_name", sym))[:36])
+        name = html.escape(str(c.get("company_name", sym))[:32])
         tv = self._tv_link(c["symbol"])
         badge = "🔥" if c["grade"] == "A+" else "⚡"
-        vah_str = f"₹{c['vah']:.1f}" if c.get("vah") else "N/A"
-        poc_str = f"₹{c['poc']:.1f}" if c.get("poc") else "N/A"
-        spring_tag = " | 🟢 Spring Bar" if c.get("has_spring_bar") else ""
+        sl_buf = c.get("sl_buffer_pct", 0.5)
+        spring_tag = " | 🟢 Spring" if c.get("has_spring_bar") else ""
 
         return (
             f"{badge} <b>PRE-BREAKOUT: <a href='{tv}'>{sym}</a></b> ({name})\n"
             f"🏆 <b>Grade {c['grade']} ({c['total_score']:.1f}/100)</b> — {html.escape(c['pattern_label'])}{spring_tag}\n"
-            f"⏱ <b>Window:</b> Day <b>{c['total_pattern_days']}/20</b> ({c['pole_days']}d Pole + {c['base_days']}d Shelf)\n\n"
-            f"📊 <b>Pattern DNA:</b>\n"
-            f"• Pole: <b>+{c['pole_high_gain_pct']:.1f}%</b> ({c['pole_start_date']}→{c['pole_end_date']}) on <b>{c['pole_rvol']:.1f}x</b> RVOL (₹{c['pole_value_cr']:.1f}Cr)\n"
-            f"• Shelf: ₹{c['shelf_low']:.2f}–₹{c['shelf_high']:.2f} (Close box <b>{c['shelf_close_spread_pct']:.1f}%</b>, upper {c['upper_pole_hold_pct']:.0f}%)\n"
-            f"• Coil: 3d range <b>{c['recent_3d_range_pct']:.1f}%</b> | Dry-Up <b>{c['dryup_pct']:.1f}%</b> (Base/Pole {c['base_to_pole_vol_pct']:.1f}%)\n"
-            f"• Daily VP: VAH <b>{vah_str}</b> | POC <b>{poc_str}</b>\n\n"
-            f"🎯 <b>Trade Plan (Daily):</b>\n"
-            f"• Close: <b>₹{c['last_close']:.2f}</b> | BO Trigger: <b>₹{c['entry_breakout']:.2f}</b>\n"
-            f"• Invalidation SL: <b>₹{c['invalidation_stop']:.2f}</b> (-{c['risk_pct_anticipatory']:.1f}%)\n"
-            f"• T1 (BOS): <b>₹{c['target_1_bos']:.2f}</b> ({c['rr_to_t1']:.1f}R) | T2: <b>₹{c['target_2_ext']:.2f}</b> ({c['rr_to_t2']:.1f}R)"
+            f"⏱ <b>Day {c['total_pattern_days']}/20</b> ({c['pole_days']}d Pole +{c['pole_high_gain_pct']:.0f}% on {c['pole_rvol']:.0f}x Vol + {c['base_days']}d Flag)\n"
+            f"📊 Flag ₹{c['shelf_low']:.2f}–₹{c['shelf_high']:.2f} (Box <b>{c['shelf_close_spread_pct']:.1f}%</b> | Dry-Up <b>{c['dryup_pct']:.1f}%</b>)\n\n"
+            f"🎯 <b>FULL TRADE PLAN (Daily):</b>\n"
+            f"• <b>Entry (BO):</b> ₹{c['entry_breakout']:.2f} <i>(Flag CMP: ₹{c['last_close']:.2f})</i>\n"
+            f"• <b>Stop Loss:</b> ₹{c['invalidation_stop']:.2f} <i>(-{c['risk_pct_breakout']:.1f}% BO | {sl_buf:.1f}% below flag low ₹{c['shelf_low']:.2f})</i>\n"
+            f"• <b>TP1 ({c['rr_to_tp1']:.1f}R):</b> ₹{c['tp1']:.2f} (+{c['tp1_pct']:.1f}%)\n"
+            f"• <b>TP2 ({c['rr_to_tp2']:.1f}R):</b> ₹{c['tp2']:.2f} (+{c['tp2_pct']:.1f}%)\n"
+            f"• <b>TP3 ({c['rr_to_tp3']:.1f}R):</b> ₹{c['tp3']:.2f} (+{c['tp3_pct']:.1f}% | Pole Target)"
         )
 
     def format_live_trigger_caption(self, ev: Dict[str, Any]) -> str:
         sym = html.escape(ev["symbol"])
-        name = html.escape(str(ev.get("company_name", sym))[:34])
+        name = html.escape(str(ev.get("company_name", sym))[:30])
         tv = self._tv_link(ev["symbol"])
 
         icons = {
@@ -175,15 +173,22 @@ class TelegramNotifier:
         icon = icons.get(ev["trigger_type"], "🔔")
         label = ev["trigger_type"].replace("_", " ")
         chg_sign = "+" if ev["day_chg_pct"] >= 0 else ""
+        sl_buf = ev.get("sl_buffer_pct", 0.5)
+
+        def _fmt_tp(label_tp: str, price: float, rr: float, pct: float) -> str:
+            if ev["live_price"] >= price:
+                return f"• <b>{label_tp}:</b> ₹{price:.2f} <i>(✅ Already Hit)</i>"
+            return f"• <b>{label_tp} ({rr:.1f}R):</b> ₹{price:.2f} ({pct:+.1f}%)"
 
         return (
             f"{icon} <b>LIVE {label}: <a href='{tv}'>{sym}</a></b> ({name})\n"
-            f"🕒 {html.escape(ev['timestamp_ist'])} | Day <b>{ev['day_of_pattern']}/20</b> | Grade <b>{ev['setup_grade']} ({ev['setup_score']:.0f})</b>\n\n"
-            f"💹 <b>Live Daily Candle:</b>\n"
-            f"• LTP: <b>₹{ev['live_price']:.2f}</b> ({chg_sign}{ev['day_chg_pct']:.2f}%) | Gap: {ev['gap_pct']:+.2f}%\n"
-            f"• O: ₹{ev['day_open']:.2f} | H: ₹{ev['day_high']:.2f} | L: ₹{ev['day_low']:.2f} | CLV: <b>{ev['daily_clv']:.0%}</b>\n"
-            f"• Projected RVOL vs Base: <b>{ev['projected_rvol_vs_base']:.1f}x</b>\n\n"
-            f"🧠 <i>{html.escape(ev['reason'])}</i>\n\n"
-            f"🎯 <b>Key Levels:</b> Shelf ₹{ev['shelf_low']:.2f}–₹{ev['shelf_high']:.2f} | "
-            f"SL <b>₹{ev['invalidation_stop']:.2f}</b> | T1 <b>₹{ev['target_1_bos']:.2f}</b> | T2 <b>₹{ev['target_2_ext']:.2f}</b>"
+            f"🕒 {html.escape(ev['timestamp_ist'])} | Day <b>{ev['day_of_pattern']}/20</b> | Grade <b>{ev['setup_grade']} ({ev['setup_score']:.0f})</b>\n"
+            f"💹 LTP <b>₹{ev['live_price']:.2f}</b> ({chg_sign}{ev['day_chg_pct']:.2f}%) | RVOL <b>{ev['projected_rvol_vs_base']:.1f}x</b> | CLV <b>{ev['daily_clv']:.0%}</b>\n\n"
+            f"🎯 <b>FULL TRADE PLAN:</b>\n"
+            f"• <b>Entry:</b> ₹{ev['live_price']:.2f} <i>(BO level ₹{ev['entry_breakout']:.2f})</i>\n"
+            f"• <b>Stop Loss:</b> ₹{ev['invalidation_stop']:.2f} <i>(-{ev['live_risk_pct']:.1f}% | {sl_buf:.1f}% below flag low ₹{ev['shelf_low']:.2f})</i>\n"
+            f"{_fmt_tp('TP1', ev['tp1'], ev['rr_to_tp1'], ev['tp1_pct'])}\n"
+            f"{_fmt_tp('TP2', ev['tp2'], ev['rr_to_tp2'], ev['tp2_pct'])}\n"
+            f"{_fmt_tp('TP3', ev['tp3'], ev['rr_to_tp3'], ev['tp3_pct'])}\n\n"
+            f"🧠 <i>{html.escape(ev['reason'])}</i>"
         )

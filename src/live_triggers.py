@@ -48,9 +48,20 @@ class LiveTriggerEvent:
     shelf_low: float
     vah: Optional[float]
     poc: Optional[float]
+    # Full Trade Plan (Entry, SL = 0.5% below flag low, TP1, TP2, TP3)
+    entry_breakout: float
     invalidation_stop: float
-    target_1_bos: float
-    target_2_ext: float
+    sl_buffer_pct: float
+    live_risk_pct: float
+    tp1: float
+    tp2: float
+    tp3: float
+    tp1_pct: float
+    tp2_pct: float
+    tp3_pct: float
+    rr_to_tp1: float
+    rr_to_tp2: float
+    rr_to_tp3: float
     reason: str
 
     def to_dict(self) -> Dict[str, Any]:
@@ -124,9 +135,30 @@ def evaluate_live_daily_triggers(
     shelf_low = float(candidate["shelf_low"])
     vah = candidate.get("vah")
     poc = candidate.get("poc")
-    stop = float(candidate["invalidation_stop"])
-    t1 = float(candidate["target_1_bos"])
-    t2 = float(candidate["target_2_ext"])
+
+    tp_cfg = cfg.get("trade_plan", {})
+    sl_buf_pct = float(candidate.get("sl_buffer_pct", tp_cfg.get("sl_buffer_pct", 0.5)))
+    entry_bo = float(candidate.get("entry_breakout", round(shelf_high * 1.003, 2)))
+    # Always enforce SL = 0.5% below flag low (shelf_low)
+    stop = round(round((shelf_low * (1.0 - sl_buf_pct / 100.0)) * 20.0) / 20.0, 2)
+    if "invalidation_stop" in candidate:
+        stop = float(candidate["invalidation_stop"])
+
+    risk_bo = max(entry_bo - stop, entry_bo * 0.015)
+    tp1 = float(candidate.get("tp1", candidate.get("target_1_bos", round(entry_bo + risk_bo, 2))))
+    tp2 = float(candidate.get("tp2", candidate.get("target_2_ext", round(tp1 + risk_bo, 2))))
+    tp3 = float(candidate.get("tp3", round(tp2 + risk_bo, 2)))
+
+    # Live Risk & R:R calculated cleanly from current LTP vs SL
+    live_risk_amt = max(live_price - stop, live_price * 0.01)
+    live_risk_pct = round((live_price - stop) / live_price * 100.0, 2)
+    tp1_pct = round((tp1 - live_price) / live_price * 100.0, 1)
+    tp2_pct = round((tp2 - live_price) / live_price * 100.0, 1)
+    tp3_pct = round((tp3 - live_price) / live_price * 100.0, 1)
+    rr_tp1 = round((tp1 - live_price) / live_risk_amt, 2)
+    rr_tp2 = round((tp2 - live_price) / live_risk_amt, 2)
+    rr_tp3 = round((tp3 - live_price) / live_risk_amt, 2)
+
     ts_str = ref_dt.strftime("%Y-%m-%d %H:%M IST")
 
     events: List[LiveTriggerEvent] = []
@@ -157,9 +189,19 @@ def evaluate_live_daily_triggers(
             shelf_low=shelf_low,
             vah=vah,
             poc=poc,
+            entry_breakout=entry_bo,
             invalidation_stop=stop,
-            target_1_bos=t1,
-            target_2_ext=t2,
+            sl_buffer_pct=sl_buf_pct,
+            live_risk_pct=live_risk_pct,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            tp1_pct=tp1_pct,
+            tp2_pct=tp2_pct,
+            tp3_pct=tp3_pct,
+            rr_to_tp1=rr_tp1,
+            rr_to_tp2=rr_tp2,
+            rr_to_tp3=rr_tp3,
             reason=reason,
         )
 

@@ -159,14 +159,16 @@ def generate_pattern_chart(
         ax_price.axvline(n - 1, color="#facc15", ls="--", lw=1.0, alpha=0.7, zorder=2)
 
     # ------------------------------------------------------------------
-    # 3. Structural Price Lines: VAH, POC, VAL, Stop, Targets
+    # 3. Structural Price Lines: VAH, POC, VAL, SL, TP1, TP2, TP3
     # ------------------------------------------------------------------
     vah = setup.get("vah")
     poc = setup.get("poc")
     val = setup.get("val")
+    entry_bo = float(setup.get("entry_breakout", shelf_high * 1.003))
     stop = float(setup["invalidation_stop"])
-    t1 = float(setup["target_1_bos"])
-    t2 = float(setup["target_2_ext"])
+    tp1 = float(setup.get("tp1", setup.get("target_1_bos", entry_bo * 1.06)))
+    tp2 = float(setup.get("tp2", setup.get("target_2_ext", entry_bo * 1.12)))
+    tp3 = float(setup.get("tp3", entry_bo * 1.20))
 
     if poc:
         ax_price.axhline(poc, color=POC_COL, ls="-", lw=1.1, alpha=0.80, zorder=2)
@@ -177,20 +179,39 @@ def generate_pattern_chart(
     if val:
         ax_price.axhline(val, color=VAH_COL, ls=":", lw=0.85, alpha=0.60, zorder=2)
 
-    # Smart Y-axis limits to fit all candles + targets cleanly
+    # Smart Y-axis limits to fit all candles + Entry/SL/TP1/TP2/TP3 cleanly without crushing candles
     y_min_val = min(float(np.min(lows)), stop) * 0.965
-    y_max_val = max(float(np.max(highs)), t1 * 1.02, min(t2, float(np.max(highs)) * 1.15)) * 1.035
+    y_max_val = max(float(np.max(highs)), tp1 * 1.02, min(tp3, float(np.max(highs)) * 1.24)) * 1.035
 
-    # Stop & Target lines extending across right portion of chart
+    # Stop, Breakout Entry & Target lines extending across right portion of chart
     x_lvl_start = max(0, (min(base_xs) - 1) if base_xs else (n - 12))
-    ax_price.hlines(stop, x_lvl_start, n + 0.3, colors=STOP_COL, linestyles="--", lw=1.0, alpha=0.85, zorder=3)
-    ax_price.hlines(t1, x_lvl_start, n + 0.3, colors=TGT_COL, linestyles="--", lw=1.0, alpha=0.85, zorder=3)
+    ax_price.hlines(stop, x_lvl_start, n + 0.3, colors=STOP_COL, linestyles="--", lw=1.1, alpha=0.92, zorder=3)
+    ax_price.hlines(entry_bo, x_lvl_start, n + 0.3, colors="#38bdf8", linestyles="-.", lw=1.0, alpha=0.88, zorder=3)
+    ax_price.hlines(tp1, x_lvl_start, n + 0.3, colors=TGT_COL, linestyles="--", lw=1.0, alpha=0.88, zorder=3)
 
-    ax_price.text(n + 0.55, stop, f"SL {stop:.1f}", color=STOP_COL, fontsize=7.6, va="center", fontweight="bold", clip_on=True)
-    ax_price.text(n + 0.55, t1, f"T1 {t1:.1f}", color=TGT_COL, fontsize=7.6, va="center", fontweight="bold", clip_on=True)
-    if t2 <= y_max_val * 0.985:
-        ax_price.hlines(t2, x_lvl_start, n + 0.3, colors="#a78bfa", linestyles=":", lw=1.0, alpha=0.80, zorder=3)
-        ax_price.text(n + 0.55, t2, f"T2 {t2:.1f}", color="#a78bfa", fontsize=7.6, va="center", clip_on=True)
+    # Collect right-margin labels and nudge slightly if two levels are very close vertically
+    right_labels = [
+        (stop, f"SL {stop:.2f}", STOP_COL),
+        (entry_bo, f"BO {entry_bo:.2f}", "#38bdf8"),
+        (tp1, f"TP1 {tp1:.1f}", TGT_COL),
+    ]
+    if tp2 <= y_max_val * 0.985:
+        ax_price.hlines(tp2, x_lvl_start, n + 0.3, colors="#a78bfa", linestyles="--", lw=0.95, alpha=0.85, zorder=3)
+        right_labels.append((tp2, f"TP2 {tp2:.1f}", "#a78bfa"))
+    if tp3 <= y_max_val * 0.985:
+        ax_price.hlines(tp3, x_lvl_start, n + 0.3, colors="#fbbf24", linestyles=":", lw=0.95, alpha=0.85, zorder=3)
+        right_labels.append((tp3, f"TP3 {tp3:.1f}", "#fbbf24"))
+
+    right_labels.sort(key=lambda item: item[0])
+    min_gap = (y_max_val - y_min_val) * 0.036
+    placed_ys: list[float] = []
+    for raw_y, lbl_txt, lbl_col in right_labels:
+        draw_y = raw_y
+        if placed_ys and (draw_y - placed_ys[-1]) < min_gap:
+            draw_y = placed_ys[-1] + min_gap
+        placed_ys.append(draw_y)
+        if draw_y <= y_max_val * 0.99:
+            ax_price.text(n + 0.50, draw_y, lbl_txt, color=lbl_col, fontsize=7.4, va="center", fontweight="bold", clip_on=True)
 
     # Pole & Shelf inline annotations (auto-offset POLE badge left when close to shelf_high so badges never collide)
     if pole_xs:
@@ -330,8 +351,9 @@ def generate_pattern_chart(
         )
         title_col = "#facc15"
         subtitle = (
-            f"{setup.get('company_name', symbol)}  •  {setup['pattern_label']}  •  "
-            f"RVOL {live_trigger['projected_rvol_vs_base']:.1f}x Base  •  {live_trigger['timestamp_ist']}"
+            f"LTP ₹{live_trigger['live_price']:.2f} (RVOL {live_trigger['projected_rvol_vs_base']:.1f}x)  •  "
+            f"SL ₹{stop:.2f} (-{setup.get('sl_buffer_pct', 0.5):.1f}% flag)  |  "
+            f"TP1 ₹{tp1:.1f}  |  TP2 ₹{tp2:.1f}  |  TP3 ₹{tp3:.1f}  •  {live_trigger['timestamp_ist']}"
         )
     else:
         title_str = (
@@ -341,8 +363,8 @@ def generate_pattern_chart(
         title_col = TEXT_MAIN
         subtitle = (
             f"{setup.get('company_name', symbol)}  •  As of {setup['scan_date']}  •  "
-            f"Breakout > ₹{setup['entry_breakout']:.2f}  |  SL ₹{stop:.2f} ({setup['risk_pct_anticipatory']:.1f}%)  |  "
-            f"T1 ₹{t1:.2f}  |  T2 ₹{t2:.2f}"
+            f"Entry > ₹{entry_bo:.2f}  |  SL ₹{stop:.2f} (-{setup.get('sl_buffer_pct', 0.5):.1f}% flag)  |  "
+            f"TP1 ₹{tp1:.1f}  |  TP2 ₹{tp2:.1f}  |  TP3 ₹{tp3:.1f}"
         )
 
     fig.text(0.06, 0.955, title_str, color=title_col, fontsize=12.2, fontweight="bold", va="top")

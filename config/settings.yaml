@@ -54,8 +54,16 @@ pattern:
 scoring:
   min_watchlist_score: 60         # Min score (0-100) to store in state/coiled_candidates.json
   min_eod_alert_score: 68         # Min score (0-100) to feature in EOD Telegram Digest
-  max_eod_chart_alerts: 8         # Max individual annotated Daily chart images sent at EOD
+  max_eod_chart_alerts: 15        # Send annotated Daily Chart Pattern PNG for every alerted setup
   max_watchlist_size: 40          # Max coiled stocks monitored by Stage-2 Live Scanner
+
+trade_plan:
+  entry_breakout_buffer_pct: 0.3  # Breakout entry = 0.3% above flag ceiling (shelf_high)
+  sl_buffer_pct: 0.5              # Stop loss = 0.5% below flag low (shelf_low)
+  tp1_r_multiple: 1.0             # Minimum 1R for TP1 (or Pole High BOS if higher)
+  tp2_r_multiple: 2.0             # Minimum 2R for TP2 (or 0.618x Pole Measured Move if higher)
+  tp3_r_multiple: 3.0             # Minimum 3R for TP3 (or 1.0x Full Pole Measured Move if higher)
+  round_to_nse_tick: true         # Round Entry / SL / TP levels cleanly to ₹0.05 NSE tick size
 
 live_triggers:
   # Stage-2 Live Market Scanner evaluating TODAY's forming Daily Candle

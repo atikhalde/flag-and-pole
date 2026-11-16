@@ -53,7 +53,7 @@ def validate_symbol(
     print(f"  Shelf Box     : ₹{setup.shelf_low:.2f}–₹{setup.shelf_high:.2f} (Close spread {setup.shelf_close_spread_pct:.1f}%, upper {setup.upper_pole_hold_pct:.0f}% hold)")
     print(f"  Volume Dry-Up : {setup.dryup_pct:.1f}% collapse (Base/Pole vol {setup.base_to_pole_vol_pct:.1f}%)")
     print(f"  Daily Profile : VAH ₹{setup.vah} | POC ₹{setup.poc} | VAL ₹{setup.val} | LVN {setup.lvn_zone}")
-    print(f"  Trade Plan    : Close ₹{setup.last_close:.2f} | BO > ₹{setup.entry_breakout:.2f} | SL ₹{setup.invalidation_stop:.2f} | T1 ₹{setup.target_1_bos:.2f} | T2 ₹{setup.target_2_ext:.2f}")
+    print(f"  Trade Plan    : Entry(BO) ₹{setup.entry_breakout:.2f} (CMP ₹{setup.last_close:.2f}) | SL ₹{setup.invalidation_stop:.2f} ({setup.sl_buffer_pct:.1f}% < flag low ₹{setup.shelf_low:.2f}) | TP1 ₹{setup.tp1:.2f} | TP2 ₹{setup.tp2:.2f} | TP3 ₹{setup.tp3:.2f}")
     print(f"  Proof Chart   : {pre_chart}")
 
     # 2. Simulate Stage-2 Live Daily Trigger ON Breakout Date
