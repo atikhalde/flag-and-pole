@@ -47,10 +47,21 @@ def is_nse_market_open(dt: datetime | None = None, buffer_after_close_min: int =
     dt = dt or now_ist()
     if not is_nse_trading_day(dt.date()):
         return False
-    t = dt.time()
     close_dt = datetime.combine(dt.date(), MARKET_CLOSE, tzinfo=IST) + timedelta(minutes=buffer_after_close_min)
     open_dt = datetime.combine(dt.date(), MARKET_OPEN, tzinfo=IST)
     return open_dt <= dt <= close_dt
+
+
+def is_nse_candle_incomplete_today(dt: datetime | None = None) -> bool:
+    """
+    Return True on an NSE trading day before the 15:30 IST closing bell,
+    when any daily bar stamped with today's date from yfinance is partial/incomplete.
+    At or after 15:30 IST (and on weekends/holidays), returns False.
+    """
+    dt = dt or now_ist()
+    if not is_nse_trading_day(dt.date()):
+        return False
+    return dt.time() < MARKET_CLOSE
 
 
 def session_elapsed_minutes(dt: datetime | None = None) -> float:

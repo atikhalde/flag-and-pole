@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import time
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -27,7 +28,7 @@ from src.alert_ledger import AlertLedger
 from src.chart_generator import generate_pattern_chart
 from src.config_loader import load_config
 from src.data_fetcher import fetch_daily_batch, fetch_daily_single, fetch_nifty_benchmark
-from src.market_hours import is_nse_trading_day, now_ist
+from src.market_hours import is_nse_candle_incomplete_today, is_nse_trading_day, now_ist
 from src.pattern_detector import (
     DailyPatternSetup,
     compute_nse_breadth50,
@@ -46,12 +47,27 @@ logging.basicConfig(
 logger = logging.getLogger("eod_scanner")
 
 
+def strip_incomplete_today_bar(df: pd.DataFrame, cutoff_date: date) -> Tuple[pd.DataFrame, bool]:
+    """
+    Drop any daily bar with calendar date >= cutoff_date so Stage-1 EOD never
+    evaluates a partial/incomplete intraday candle when run before 15:30 IST.
+    """
+    if df is None or df.empty:
+        return df, False
+    idx_dates = pd.DatetimeIndex(df.index).date
+    if idx_dates[-1] >= cutoff_date:
+        trimmed = df.loc[idx_dates < cutoff_date]
+        return trimmed, True
+    return df, False
+
+
 def run_eod_scan(
     cfg: Dict[str, Any],
     force: bool = False,
     limit: int = 0,
     dry_run: bool = False,
     no_live_refresh: bool = False,
+    include_live_bar: bool = False,
 ) -> Dict[str, Any]:
     now = now_ist()
     if not force and not is_nse_trading_day(now.date()):
@@ -65,9 +81,23 @@ def run_eod_scan(
     t_cfg = cfg["telegram"]
     r_cfg = cfg.get("regime", {})
 
+    drop_incomplete_today = (not include_live_bar) and is_nse_candle_incomplete_today(now)
+    today_ist = now.date()
+    if drop_incomplete_today:
+        logger.info(
+            "NSE session for %s not yet closed (%s IST < 15:30 IST) — Stage-1 EOD will strip any incomplete %s intraday bar and scan the latest completed daily close.",
+            today_ist.isoformat(),
+            now.strftime("%H:%M"),
+            today_ist.isoformat(),
+        )
+
     # 1. Fetch NIFTY 50 (^NSEI) Benchmark for V2 Market Regime Guard & Relative Strength
     nifty_ticker = str(r_cfg.get("benchmark_ticker", "^NSEI"))
     nifty_df = fetch_nifty_benchmark(ticker=nifty_ticker, period=f_cfg["daily_period"])
+    if drop_incomplete_today and nifty_df is not None and not nifty_df.empty:
+        nifty_df, nifty_dropped = strip_incomplete_today_bar(nifty_df, today_ist)
+        if nifty_dropped:
+            logger.info("Stripped incomplete %s live bar from %s benchmark.", today_ist.isoformat(), nifty_ticker)
     regime = evaluate_nifty_regime(nifty_df, cfg=cfg)
     if regime["available"]:
         logger.info(
@@ -90,8 +120,10 @@ def run_eod_scan(
             float(r_cfg.get("min_nifty_20d_return_pct", -3.0)),
         )
         state_obj = {
+            "version": "V2.1 Core + Coil",
             "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
             "scan_date": regime.get("as_of") or now.strftime("%Y-%m-%d"),
+            "dropped_incomplete_live_bar": drop_incomplete_today,
             "universe_scanned": 0,
             "nifty_regime": regime,
             "candidates": [],
@@ -125,6 +157,24 @@ def run_eod_scan(
     )
     logger.info("Fetched clean Daily OHLCV for %d / %d symbols in %.1fs", len(daily_map), len(symbols), time.time() - t0)
 
+    if drop_incomplete_today:
+        stripped_count = 0
+        cleaned_map: Dict[str, pd.DataFrame] = {}
+        for sym, df_d in daily_map.items():
+            trimmed, was_dropped = strip_incomplete_today_bar(df_d, today_ist)
+            if was_dropped:
+                stripped_count += 1
+            if not trimmed.empty:
+                cleaned_map[sym] = trimmed
+        daily_map = cleaned_map
+        if stripped_count > 0:
+            logger.info(
+                "Stripped incomplete %s live bar from %d / %d symbols (scanning completed EOD closes).",
+                today_ist.isoformat(),
+                stripped_count,
+                len(daily_map),
+            )
+
     # 2. Compute Live NSE Market Breadth50 (% of NSE stocks > 50-SMA) with ZERO extra API calls!
     breadth_info = compute_nse_breadth50(daily_map, cfg=cfg)
     breadth50_pct = breadth_info["breadth50_pct"] if breadth_info["enforced"] else None
@@ -150,8 +200,10 @@ def run_eod_scan(
             breadth_info["min_threshold_pct"],
         )
         state_obj = {
+            "version": "V2.1 Core + Coil",
             "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
             "scan_date": breadth_info.get("as_of") or regime.get("as_of") or now.strftime("%Y-%m-%d"),
+            "dropped_incomplete_live_bar": drop_incomplete_today,
             "universe_scanned": len(daily_map),
             "nifty_regime": regime,
             "nse_breadth50": breadth_info,
@@ -185,12 +237,14 @@ def run_eod_scan(
             prelim_hits.append((sym, df_d))
 
     # Re-verify surviving hits with live-day NaN repair and full Daily Volume Profile
-    repair_enabled = bool(f_cfg.get("repair_nan_today_with_15m", True))
+    repair_enabled = bool(f_cfg.get("repair_nan_today_with_15m", True)) and not drop_incomplete_today
     matched: List[Tuple[DailyPatternSetup, DailyVolumeProfile | None, pd.DataFrame]] = []
     for sym, df_d in prelim_hits:
         df_verified = df_d
         if repair_enabled:
             repaired = fetch_daily_single(sym, period=f_cfg["daily_period"], repair_nan_today=True)
+            if drop_incomplete_today and not repaired.empty:
+                repaired, _ = strip_incomplete_today_bar(repaired, today_ist)
             if not repaired.empty and len(repaired) >= len(df_d):
                 df_verified = repaired
         setup, vp = detect_daily_pattern(
@@ -217,6 +271,7 @@ def run_eod_scan(
         "version": "V2.1 Core + Coil",
         "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
         "scan_date": scan_date,
+        "dropped_incomplete_live_bar": drop_incomplete_today,
         "universe_scanned": len(daily_map),
         "nifty_regime": regime,
         "nse_breadth50": breadth_info,
@@ -319,6 +374,7 @@ def run_eod_scan(
     return {
         "skipped": False,
         "scan_date": scan_date,
+        "dropped_incomplete_live_bar": drop_incomplete_today,
         "universe_scanned": len(daily_map),
         "nifty_regime": regime,
         "nse_breadth50": breadth_info,
@@ -338,6 +394,11 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="Limit number of symbols scanned (for testing)")
     parser.add_argument("--dry-run", action="store_true", help="Do not send Telegram messages")
     parser.add_argument("--no-live-refresh", action="store_true", help="Use bundled data/nse_universe.csv only")
+    parser.add_argument(
+        "--include-live-bar",
+        action="store_true",
+        help="Include today's incomplete intraday bar if run before 15:30 IST (default: strip incomplete bar)",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -347,6 +408,7 @@ def main() -> None:
         limit=args.limit,
         dry_run=args.dry_run,
         no_live_refresh=args.no_live_refresh,
+        include_live_bar=args.include_live_bar,
     )
     print(json.dumps(summary, indent=2))
 

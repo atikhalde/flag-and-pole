@@ -58,14 +58,37 @@ jobs:
           retention-days: 7
 
       - name: Commit updated coiled watchlist & alert ledger
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/coiled_candidates.json state/sent_alerts.json
-          if git diff --staged --quiet; then
-            echo "No state changes to commit."
-          else
+          mkdir -p /tmp/gh_state_out
+          [ -f state/coiled_candidates.json ] && cp state/coiled_candidates.json /tmp/gh_state_out/coiled_candidates.json
+          [ -f state/sent_alerts.json ] && cp state/sent_alerts.json /tmp/gh_state_out/sent_alerts.json
+
+          for attempt in 1 2 3; do
+            git fetch origin "${{ github.ref_name }}"
+            git reset --hard "origin/${{ github.ref_name }}"
+            mkdir -p state
+            if [ -f /tmp/gh_state_out/coiled_candidates.json ]; then
+              cp /tmp/gh_state_out/coiled_candidates.json state/coiled_candidates.json
+            fi
+            if [ -f /tmp/gh_state_out/sent_alerts.json ]; then
+              python -m src.alert_ledger --merge-into state/sent_alerts.json --from /tmp/gh_state_out/sent_alerts.json
+            fi
+            git add state/coiled_candidates.json state/sent_alerts.json
+            if git diff --staged --quiet; then
+              echo "No state changes to commit."
+              exit 0
+            fi
             git commit -m "chore(eod): update coiled watchlist & sent alerts ledger [skip ci]"
-            git pull --rebase origin "${{ github.ref_name }}"
-            git push origin "HEAD:${{ github.ref_name }}"
-          fi
+            if git push origin "HEAD:${{ github.ref_name }}"; then
+              echo "State synced cleanly on attempt $attempt."
+              exit 0
+            fi
+            echo "Push race detected on attempt $attempt; retrying with fresh remote state..."
+            sleep 3
+          done
+          echo "Failed to push state after 3 attempts."
+          exit 1

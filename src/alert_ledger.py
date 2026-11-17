@@ -80,6 +80,20 @@ class AlertLedger:
         if save_immediately:
             self.save()
 
+    def merge_from(self, other_path: str | Path) -> int:
+        """
+        Losslessly union symbols from another alert ledger file into this ledger.
+        Preserves existing first-alert records intact and appends any newly alerted symbols.
+        Returns the count of newly added symbols.
+        """
+        other = AlertLedger(other_path)
+        added = 0
+        for sym, meta in other.alerted_symbols.items():
+            if sym not in self.alerted_symbols:
+                self.alerted_symbols[sym] = meta
+                added += 1
+        return added
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -88,3 +102,19 @@ class AlertLedger:
             "alerted_symbols": dict(sorted(self.alerted_symbols.items())),
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Losslessly union-merge alert deduplication ledgers")
+    parser.add_argument("--merge-into", required=True, help="Target ledger path (e.g. state/sent_alerts.json)")
+    parser.add_argument("--from", dest="src_path", required=True, help="Incoming ledger path to merge from")
+    args = parser.parse_args()
+
+    target = AlertLedger(args.merge_into)
+    added_count = target.merge_from(args.src_path)
+    if added_count > 0 or not Path(args.merge_into).exists():
+        target.save()
+    print(f"AlertLedger union-merge complete: added={added_count}, total={len(target.alerted_symbols)}")
+

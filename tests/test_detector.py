@@ -373,6 +373,64 @@ class TestDailyFlagScannerV21(unittest.TestCase):
             self.assertTrue(pdf_out.exists())
             self.assertGreater(pdf_out.stat().st_size, 15_000)
 
+    def test_alert_ledger_lossless_union_merge(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from src.alert_ledger import AlertLedger
+
+        with tempfile.TemporaryDirectory() as td:
+            remote_path = Path(td) / "remote_sent_alerts.json"
+            local_path = Path(td) / "local_sent_alerts.json"
+
+            remote = AlertLedger(remote_path)
+            remote.mark_sent("BOROLTD", stage="EOD", alert_type="PRE_BREAKOUT", price=311.5, timestamp_ist="2026-11-13 16:00 IST")
+            remote.mark_sent("PARAGMILK", stage="LIVE", alert_type="GAP_AND_GO", price=344.1, timestamp_ist="2026-11-16 09:30 IST")
+
+            local = AlertLedger(local_path)
+            local.mark_sent("BOROLTD", stage="LIVE", alert_type="RETEST", price=341.0, timestamp_ist="2026-11-16 10:00 IST")
+            local.mark_sent("GYFTR", stage="EOD", alert_type="PRE_BREAKOUT", price=219.6, timestamp_ist="2026-11-16 16:00 IST")
+
+            merged = AlertLedger(remote_path)
+            added = merged.merge_from(local_path)
+            merged.save()
+
+            self.assertEqual(added, 1)
+            reloaded = AlertLedger(remote_path)
+            self.assertTrue(reloaded.is_sent("BOROLTD"))
+            self.assertTrue(reloaded.is_sent("PARAGMILK"))
+            self.assertTrue(reloaded.is_sent("GYFTR"))
+            # Original first-alert record for BOROLTD must remain untouched
+            self.assertEqual(reloaded.alerted_symbols["BOROLTD"]["timestamp_ist"], "2026-11-13 16:00 IST")
+
+    def test_eod_incomplete_intraday_bar_guard(self) -> None:
+        from datetime import date
+        from src.market_hours import is_nse_candle_incomplete_today
+        from src.run_eod_scan import strip_incomplete_today_bar
+
+        # Tue 2026-11-17: incomplete before 15:30 IST, complete at/after 15:30 IST
+        self.assertTrue(is_nse_candle_incomplete_today(datetime(2026, 11, 17, 9, 20, tzinfo=IST)))
+        self.assertTrue(is_nse_candle_incomplete_today(datetime(2026, 11, 17, 15, 29, tzinfo=IST)))
+        self.assertFalse(is_nse_candle_incomplete_today(datetime(2026, 11, 17, 15, 30, tzinfo=IST)))
+        self.assertFalse(is_nse_candle_incomplete_today(datetime(2026, 11, 17, 15, 45, tzinfo=IST)))
+        # Weekend (Sun 2026-11-15) & NSE holiday (Tue 2026-11-10) -> never incomplete
+        self.assertFalse(is_nse_candle_incomplete_today(datetime(2026, 11, 15, 11, 0, tzinfo=IST)))
+        self.assertFalse(is_nse_candle_incomplete_today(datetime(2026, 11, 10, 11, 0, tzinfo=IST)))
+
+        dates = pd.to_datetime(["2026-11-13", "2026-11-16", "2026-11-17"])
+        df = pd.DataFrame(
+            {"Open": [100, 102, 103], "High": [103, 105, 104], "Low": [99, 101, 102], "Close": [102, 104, 103], "Volume": [1e6, 1e6, 2e4]},
+            index=dates,
+        )
+        trimmed, dropped = strip_incomplete_today_bar(df, date(2026, 11, 17))
+        self.assertTrue(dropped)
+        self.assertEqual(len(trimmed), 2)
+        self.assertEqual(trimmed.index[-1].strftime("%Y-%m-%d"), "2026-11-16")
+
+        # Calling again with next day cutoff does not drop completed bars
+        same_df, dropped2 = strip_incomplete_today_bar(trimmed, date(2026, 11, 17))
+        self.assertFalse(dropped2)
+        self.assertEqual(len(same_df), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
