@@ -1,9 +1,9 @@
 {
   "version": "V2.1 Core + Coil",
-  "updated_at_ist": "2026-11-17 14:30:46 IST",
+  "updated_at_ist": "2026-11-17 14:45:35 IST",
   "scan_date": "2026-11-16",
   "dropped_incomplete_live_bar": true,
-  "universe_scanned": 2387,
+  "universe_scanned": 2404,
   "nifty_regime": {
     "available": true,
     "regime_ok": true,
