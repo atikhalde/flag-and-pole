@@ -1,6 +1,6 @@
 {
   "version": "V2.1 Core + Coil",
-  "updated_at_ist": "2026-11-18 15:30:46 IST",
+  "updated_at_ist": "2026-11-18 15:45:38 IST",
   "scan_date": "2026-11-18",
   "dropped_incomplete_live_bar": false,
   "universe_scanned": 2404,
@@ -12,8 +12,8 @@
     "above_50sma": true,
     "nifty_close": 25227.95,
     "as_of": "2026-11-18",
-    "nse_breadth50_pct": 35.7,
-    "nse_breadth_above": 838,
+    "nse_breadth50_pct": 35.6,
+    "nse_breadth_above": 836,
     "nse_breadth_total": 2349,
     "breadth_ok": false
   },
@@ -21,8 +21,8 @@
     "available": true,
     "enforced": true,
     "breadth_ok": false,
-    "breadth50_pct": 35.7,
-    "above_count": 838,
+    "breadth50_pct": 35.6,
+    "above_count": 836,
     "total_count": 2349,
     "min_threshold_pct": 40.0,
     "as_of": "2026-11-18"
