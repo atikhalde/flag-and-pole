@@ -1,31 +1,31 @@
 {
   "version": "V2.1 Core + Coil",
-  "updated_at_ist": "2026-11-19 15:15:43 IST",
-  "scan_date": "2026-11-18",
-  "dropped_incomplete_live_bar": true,
-  "universe_scanned": 2389,
+  "updated_at_ist": "2026-11-19 15:30:49 IST",
+  "scan_date": "2026-11-19",
+  "dropped_incomplete_live_bar": false,
+  "universe_scanned": 2405,
   "nifty_regime": {
     "available": true,
     "regime_ok": true,
-    "ret20_pct": 10.22,
-    "ret63_pct": 3.87,
+    "ret20_pct": 11.85,
+    "ret63_pct": 5.63,
     "above_50sma": true,
-    "nifty_close": 25227.95,
-    "as_of": "2026-11-18",
-    "nse_breadth50_pct": 35.5,
-    "nse_breadth_above": 834,
-    "nse_breadth_total": 2348,
+    "nifty_close": 25514.3,
+    "as_of": "2026-11-19",
+    "nse_breadth50_pct": 37.6,
+    "nse_breadth_above": 883,
+    "nse_breadth_total": 2349,
     "breadth_ok": false
   },
   "nse_breadth50": {
     "available": true,
     "enforced": true,
     "breadth_ok": false,
-    "breadth50_pct": 35.5,
-    "above_count": 834,
-    "total_count": 2348,
+    "breadth50_pct": 37.6,
+    "above_count": 883,
+    "total_count": 2349,
     "min_threshold_pct": 40.0,
-    "as_of": "2026-11-18"
+    "as_of": "2026-11-19"
   },
   "candidates": []
 }
