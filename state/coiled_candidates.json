@@ -1,9 +1,9 @@
 {
   "version": "V2.1 Core + Coil",
-  "updated_at_ist": "2026-11-23 15:00:42 IST",
+  "updated_at_ist": "2026-11-23 15:15:43 IST",
   "scan_date": "2026-11-20",
   "dropped_incomplete_live_bar": true,
-  "universe_scanned": 2418,
+  "universe_scanned": 2387,
   "nifty_regime": {
     "available": true,
     "regime_ok": true,
@@ -13,8 +13,8 @@
     "nifty_close": 25800.6,
     "as_of": "2026-11-20",
     "nse_breadth50_pct": 35.7,
-    "nse_breadth_above": 843,
-    "nse_breadth_total": 2362,
+    "nse_breadth_above": 840,
+    "nse_breadth_total": 2351,
     "breadth_ok": false
   },
   "nse_breadth50": {
@@ -22,8 +22,8 @@
     "enforced": true,
     "breadth_ok": false,
     "breadth50_pct": 35.7,
-    "above_count": 843,
-    "total_count": 2362,
+    "above_count": 840,
+    "total_count": 2351,
     "min_threshold_pct": 40.0,
     "as_of": "2026-11-20"
   },
