@@ -26,6 +26,7 @@ fetcher:
   # killing Stage-2 monitoring until the next good scan. Abort instead.
   min_fetch_success_pct: 50.0     # Abort (non-zero exit, state untouched) below this % of symbols fetched
   min_fetched_symbols: 100        # Absolute floor; ignored when --limit is used for tiny test runs
+  min_backtest_universe: 30       # Stage-3 floor; explicit --symbols / tiny --limit runs are exempt
 
 regime:
   # V2.1 Dual Market Regime Guard (NIFTY 50 Momentum + Live NSE Market Breadth)

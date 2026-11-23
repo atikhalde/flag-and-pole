@@ -33,6 +33,7 @@ from src.data_fetcher import fetch_daily_batch, fetch_nifty_benchmark
 from src.market_hours import now_ist
 from src.pattern_detector import compute_breadth50_series
 from src.pdf_report import generate_backtest_pdf
+from src.run_visibility import publish_abort
 from src.telegram_notifier import TelegramNotifier
 from src.universe import fetch_nse_universe
 
@@ -90,7 +91,14 @@ def run_backtest(
     max_hold_days: int = 60,
     send_telegram: bool = False,
     no_live_refresh: bool = False,
+    parse_only: bool = False,
 ) -> Dict[str, Any]:
+    """Run the V2.1 backtest.
+
+    `parse_only=True` validates the CLI/config/universe/download path and then
+    stops before scanning, so CI can detect an argparse/config break WITHOUT
+    burning a 90-minute slot on a full historical backtest.
+    """
     t0 = time.time()
     now = now_ist()
     u_cfg = cfg["universe"]
@@ -148,6 +156,55 @@ def run_backtest(
         repair_nan_today=False,
     )
     logger.info("Downloaded historical Daily OHLCV for %d / %d symbols in %.1fs", len(daily_map), len(symbols), time.time() - t0)
+
+    # --- Data-integrity guard -----------------------------------------------
+    # Without this, a Yahoo outage silently produces a tiny "backtest", publishes
+    # a near-empty PDF, and the run still goes green — which is exactly how a
+    # 2,400-symbol / 2-year backtest can appear to finish in ~3 minutes.
+    min_universe_abs = int(f_cfg.get("min_backtest_universe", 30))
+    min_fetched_pct = float(f_cfg.get("min_fetch_success_pct", 50.0))
+    # Explicit small runs (--symbols or a small --limit) are intentionally exempt
+    # from the size floor, but ZERO data is never a meaningful backtest.
+    small_explicit_run = bool(symbols_override) or (0 < limit <= min_universe_abs)
+
+    if not daily_map:
+        msg = f"Zero of {len(symbols)} symbols downloaded — no data to backtest"
+        publish_abort(msg, {"fetched": 0, "requested": len(symbols)})
+        logger.error("ABORTING backtest: %s — no report generated.", msg)
+        return {"aborted": True, "reason": "data_fetch_failed", "fetched": 0, "requested": len(symbols)}
+
+    if not small_explicit_run:
+        fetched_pct = (len(daily_map) / len(symbols) * 100.0) if symbols else 0.0
+        if len(daily_map) < min_universe_abs or fetched_pct < min_fetched_pct:
+            msg = (
+                f"Only {len(daily_map)}/{len(symbols)} symbols downloaded ({fetched_pct:.1f}%) — "
+                f"below the {min_fetched_pct:.0f}% / {min_universe_abs}-symbol backtest integrity floor"
+            )
+            publish_abort(msg, {"fetched": len(daily_map), "requested": len(symbols)})
+            logger.error("ABORTING backtest: %s — no report generated.", msg)
+            return {
+                "aborted": True,
+                "reason": "data_fetch_failed",
+                "fetched": len(daily_map),
+                "requested": len(symbols),
+            }
+        if fetched_pct < 90.0:
+            logger.warning(
+                "Backtest universe is degraded: %d/%d symbols (%.1f%%). Report will note reduced coverage.",
+                len(daily_map),
+                len(symbols),
+                fetched_pct,
+            )
+
+    if parse_only:
+        logger.info("Preflight OK — parsed arguments, config and downloaded %d symbol(s). Exiting before scan.", len(daily_map))
+        return {
+            "parse_only": True,
+            "ok": True,
+            "period": period,
+            "universe_scanned": len(daily_map),
+            "symbols_requested": len(symbols),
+        }
 
     min_br_univ = int(r_cfg.get("min_breadth_universe", 30))
     breadth50_series = compute_breadth50_series(daily_map, min_stocks=min_br_univ)
@@ -279,6 +336,11 @@ def main() -> None:
     parser.add_argument("--max-hold-days", type=int, default=60, help="Max trading days to hold a trade")
     parser.add_argument("--send-telegram", action="store_true", help="Send generated PDF report to Telegram bots")
     parser.add_argument("--no-live-refresh", action="store_true", help="Use bundled data/nse_universe.csv only")
+    parser.add_argument(
+        "--parse-only",
+        action="store_true",
+        help="Validate CLI/config/universe/download path, then exit before the (long) historical scan",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -295,8 +357,13 @@ def main() -> None:
         max_hold_days=args.max_hold_days,
         send_telegram=args.send_telegram,
         no_live_refresh=args.no_live_refresh,
+        parse_only=args.parse_only,
     )
     print(json.dumps(res, indent=2))
+
+    # A data-integrity abort must go red; a legitimately quiet backtest must not.
+    if res.get("aborted"):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

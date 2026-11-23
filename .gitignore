@@ -7,6 +7,7 @@ venv/
 output/charts/*.png
 output/backtest/*.pdf
 output/backtest/*.csv
+output/scan_summary.json
 !output/charts/.gitkeep
 !output/backtest/.gitkeep
 .pytest_cache/

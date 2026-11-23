@@ -43,7 +43,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Fast gate (1-2 min) that catches argparse/config/universe breakage in Stage 3
+  # WITHOUT occupying a 90-minute slot on the full historical scan. Stage 3 is
+  # manual-only, so a silent break would otherwise go unnoticed for weeks.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run test suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pip install pytest && python -m pytest tests/ -q
+
+      # Every CLI flag the full run can pass is exercised here, so a renamed or
+      # dropped argument fails fast instead of 30 minutes into the real backtest.
+      - name: Validate backtest CLI + data path (--parse-only)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m src.run_backtest \
+            --period "${{ inputs.period || '2y' }}" \
+            --limit 5 \
+            --min-score "${{ inputs.min_score || '66' }}" \
+            --parse-only
+          python -m src.run_backtest --help > /dev/null
+
   backtest-report:
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 90
 

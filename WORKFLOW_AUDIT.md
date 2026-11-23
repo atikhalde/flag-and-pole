@@ -241,6 +241,61 @@ is outside this sandbox's allowed egress.)
 
 ---
 
+## 4b. Follow-up fixes (second pass)
+
+The first round of fixes was re-verified end-to-end rather than trusted. It contained a
+**real bug of its own**, plus two gaps of the same family.
+
+### 🔴 F1 — The abort fix did not actually fail the build (fixed)
+
+The circuit breaker returned `{"aborted": true}` from the library, but:
+
+1. `run_eod_scan.main()` still **exited 0**, and
+2. `check_state.py` inspected `state/coiled_candidates.json` — which an abort deliberately
+   leaves **untouched**, so it still held the last healthy scan and reported `State OK`.
+
+Net result: an outage produced `"aborted": true` and a **green** run. Exactly the failure
+mode the fix was meant to remove.
+
+```
+RUN EXIT CODE = 0
+"aborted": true
+State OK: 0 candidate(s), alerts_paused=False     <- verifier saw stale-but-healthy state
+CHECK_STATE EXIT = 0
+```
+
+**Fixed by:** `--summary-out` persists the run summary; `main()` raises `SystemExit(1)` on
+`aborted`; `check_state.verify()` now reads the **summary** (falling back to state) so an
+abort is red while a guard pause stays green.
+
+```
+RUN EXIT = 1
+::error::Stage-1 aborted (data_fetch_failed) (0/5 symbols); state left untouched.
+CHECK_STATE EXIT = 1
+STATE UNTOUCHED ✅
+```
+
+### 🟠 F2 — Stage 2 had no integrity guard at all (fixed)
+
+A Yahoo outage during market hours produced `0 triggers fired` — indistinguishable from a
+genuinely quiet session. A missed breakout and no breakout looked identical. Stage 2 now
+detects `<50%` fetch, logs `Live scan DEGRADED`, writes a job summary and **exits 1**.
+
+### 🟠 F3 — Stage 3's anomaly had the same root cause as P4 (fixed)
+
+The unexplained 3-minute / 105 KB backtests (P7) were almost certainly a small universe: Stage 3
+had **no** integrity guard, so a partial Yahoo fetch silently produced a tiny backtest and a
+near-empty PDF, still green. It now aborts below `min_backtest_universe` / `min_fetch_success_pct`
+(explicit `--symbols` and tiny `--limit` runs exempt, but **zero** data always aborts).
+
+### 🟠 F4 — Stage 3 was completely unverified in CI (fixed)
+
+It is manual-only, so a broken argparse/config path would go unnoticed for weeks. A new
+`preflight` job runs the test suite plus `--parse-only` (validates CLI + config + universe +
+download, then exits before the long scan). `backtest-report` now `needs: preflight`.
+
+---
+
 ## 5. Recommended priority
 
 | # | Action | Effort | Impact |
@@ -259,14 +314,26 @@ is outside this sandbox's allowed egress.)
 ## 6. Bottom line
 
 Nothing is broken. The code, tests, CLI contracts, cron expressions, dedup merge and state-commit
-retry logic are all in good shape, and 99% of runs are green.
+retry logic are all in good shape.
 
-The automation is currently **idle by design rather than by failure**: NSE breadth (32.8%) is below the
-40% floor, so Stage 1 writes an empty watchlist, and Stage 2 — which also honours that same breadth
-flag — monitors one symbol that the permanent-dedup ledger has already silenced. On top of that, the
-`*/15` schedule is delivering only ~16% of its ticks during market hours, and it is masked because the
-market-hours gate quietly discards late runs.
+The automation was **idle by design rather than by failure**: NSE breadth (32.8%) sat below the 40%
+floor, so Stage 1 wrote an empty watchlist, and Stage 2 — which honoured that same breadth flag —
+monitored one symbol the permanent-dedup ledger had already silenced.
 
-The two changes that would give you real signal are **pinning dependencies** (to keep the green
-builds) and **rethinking `strict_never_repeat_symbol` + stale-breadth handoff** (to let the scanner
-actually speak again).
+After two passes, every finding in this document is fixed and **verified by execution**, not by
+inspection:
+
+| Check | Result |
+|---|---|
+| Tests | **37 passed** (was 10) |
+| pyflakes | clean |
+| All 5 CLI entry points `--help` | OK |
+| All 18 modules import | OK |
+| Workflow YAML parse + job graph | OK |
+| Abort → red build | `scan_exit=1`, `verify_exit=1` |
+| Guard pause → green build | `verify_exit=0` |
+| Market closed → green build | `verify_exit=0` |
+| Outage → state preserved | byte-identical ✅ |
+
+The single most important lesson from the second pass: **a fix that reports success without
+proving it is the same bug in a new costume.** The first abort fix looked correct and was not.
