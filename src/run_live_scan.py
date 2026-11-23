@@ -132,11 +132,12 @@ def run_live_scan(
             )
             return {"skipped": True, "reason": "nse_breadth_paused", "nifty_regime": regime, "nse_breadth50": saved_breadth}
 
-    # When the saved reading is stale we cannot pass a trustworthy breadth into
-    # the scorer, so score without the breadth pillar rather than with a lie.
-    saved_br_pct = None
-    if saved_breadth.get("enforced") and not breadth_is_stale:
-        saved_br_pct = saved_breadth.get("breadth50_pct")
+    # Custom-watchlist symbols are scored with the CONFIGURED FLOOR, not the live
+    # reading: `detect_daily_pattern` returns None whenever the breadth it is
+    # handed is under the floor, so passing a weak (or stale) value would quietly
+    # drop custom symbols from the scan. The guard above already decided whether
+    # this run may alert at all; it must not also decide whether we can look.
+    saved_br_pct = float(r_cfg.get("min_nse_breadth50_pct", 40.0))
     raw_candidates: List[Dict[str, Any]] = list(wl_state.get("candidates", []))
     # Skip any stale pre-V2.1 candidates missing Option A / V2.1 schema fields
     candidates: List[Dict[str, Any]] = [

@@ -102,7 +102,20 @@ good `coiled_candidates.json` with an empty watchlist, committing it.
 fetched. Small `--limit` test runs are exempt. `python -m src.check_state` converts the soft abort into a
 non-zero exit so the Actions UI shows a failure rather than a false green.
 
-### 4. Repeat-alert policy
+### 4. Verifying without network access
+
+`scripts/dryrun.py` patches only the network boundary and runs the real detection, scoring, chart,
+ledger and PDF code against synthetic data:
+
+```bash
+python scripts/dryrun.py            # 19 checks
+python scripts/dryrun.py --quick    # skip the Stage-3 PDF build
+```
+
+It is the fastest way to confirm a change did not break the pipeline when Yahoo/NSE are
+unreachable, and it is what caught the "tripped breadth guard still wipes the watchlist" bug.
+
+### 5. Repeat-alert policy
 
 `deduplication.strict_never_repeat_symbol: true` together with `repeat_cooldown_days: 20` gives a
 **cooldown** policy: a symbol is suppressed for 20 days after alerting, then becomes eligible again for a
@@ -132,7 +145,7 @@ break all three workflows.
 ```bash
 pip install -r requirements.txt
 
-# 1. Run unit tests (34/34 covering all V2.1 gates, Breadth50, Option A Daily-Close SL, multi-bot, dedup, data-integrity & PDF)
+# 1. Run unit tests (43/43 covering all V2.1 gates, Breadth50, Option A Daily-Close SL, multi-bot, dedup, data-integrity & PDF)
 python -m unittest discover -s tests -v
 
 # 2. Validate V2.1 Core + Coil on BOROLTD (pre-breakout 13 Nov + live breakout 16 Nov)
@@ -143,4 +156,9 @@ python -m src.run_eod_scan --force --limit 200 --dry-run
 
 # 4. Run Stage-3 Historical Backtest & generate PDF Report (default min-score 66 = V2.1 Grade A & A+)
 python -m src.run_backtest --period 2y --limit 500 --min-score 66
+
+# 5. Offline end-to-end dry run (no network needed) — drives Stage 1+2+3 with
+#    synthetic OHLCV and asserts 19 invariants. Useful in sandboxes/CI where
+#    Yahoo & NSE are unreachable.
+python scripts/dryrun.py
 ```

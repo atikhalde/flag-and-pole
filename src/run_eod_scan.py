@@ -67,18 +67,29 @@ def check_fetch_integrity(
     if requested <= 0:
         return True, "No symbols requested from the NSE universe"
 
-    # Small explicit test runs are exempt from the absolute floor.
-    if limit and requested <= max(limit, 1) and requested < min_abs:
-        if fetched == 0:
-            return True, f"Zero of {requested} requested symbols returned data"
-        return False, ""
+    if fetched <= 0:
+        return True, f"Zero of {requested} requested symbols returned data"
 
     pct = fetched / requested * 100.0
-    if fetched < min_abs or pct < min_pct:
+
+    # Coverage floor: a partial download is a data outage, whatever its size.
+    if pct < min_pct:
         return (
             True,
             f"Only {fetched}/{requested} symbols fetched ({pct:.1f}%) — below the "
-            f"{min_pct:.0f}% / {min_abs}-symbol integrity floor",
+            f"{min_pct:.0f}% coverage floor",
+        )
+
+    # Absolute floor: guards against a run that asked for a LARGE universe but
+    # got back only a handful. It is deliberately scoped to large universes, so a
+    # small-but-complete run (a --limit test, or a 63-symbol watchlist fetching
+    # all 63) is never aborted for the crime of being small — that would make a
+    # 100% successful fetch fail, which is both wrong and self-contradictory.
+    if requested >= max(min_abs * 2, 200) and fetched < min_abs:
+        return (
+            True,
+            f"Only {fetched}/{requested} symbols fetched ({pct:.1f}%) — below the "
+            f"{min_abs}-symbol absolute floor",
         )
     return False, ""
 
@@ -217,7 +228,14 @@ def run_eod_scan(
 
     # 2. Compute Live NSE Market Breadth50 (% of NSE stocks > 50-SMA) with ZERO extra API calls!
     breadth_info = compute_nse_breadth50(daily_map, cfg=cfg)
-    breadth50_pct = breadth_info["breadth50_pct"] if breadth_info["enforced"] else None
+    # IMPORTANT: Stage-1 detection must be INDEPENDENT of the breadth guard.
+    # `detect_daily_pattern` rejects every setup whose passed breadth is under the
+    # floor (pattern_detector.py:~462). Feeding it the live value therefore made a
+    # weak-breadth day write an EMPTY watchlist — silently wiping the very list
+    # this reordering exists to preserve, and leaving Stage-2 with nothing to
+    # monitor. Detection gets the configured floor (always satisfied here); the
+    # guard is applied further down to decide DISPATCH only.
+    detection_breadth_pct = float(r_cfg.get("min_nse_breadth50_pct", 40.0))
     if breadth_info["available"]:
         logger.info(
             "NSE Live Breadth50 (%s): %.1f%% (%d / %d stocks > 50 SMA) | Threshold>=%.0f%% | Guard=%s",
@@ -268,7 +286,7 @@ def run_eod_scan(
             df_d,
             cfg,
             nifty_df=nifty_df,
-            breadth50_pct=breadth50_pct,
+            breadth50_pct=detection_breadth_pct,
             compute_vp=False,
         )
         if setup is not None and setup.total_score >= min_wl_score:
@@ -291,7 +309,7 @@ def run_eod_scan(
             df_verified,
             cfg,
             nifty_df=nifty_df,
-            breadth50_pct=breadth50_pct,
+            breadth50_pct=detection_breadth_pct,
             compute_vp=True,
         )
         if setup is not None and setup.total_score >= min_wl_score:
