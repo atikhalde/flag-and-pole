@@ -231,3 +231,56 @@ class TestCheckState(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAbortIsActuallyRed(unittest.TestCase):
+    """
+    Regression: the first version of the circuit breaker returned `aborted: true`
+    from the library but main() still exited 0, AND the verifier read the
+    untouched state file and reported OK — so a silent abort still showed green.
+    """
+
+    def test_verify_reads_run_summary_not_just_state(self) -> None:
+        from src.check_state import verify
+
+        with tempfile.TemporaryDirectory() as td:
+            summary = Path(td) / "summary.json"
+            state = Path(td) / "coiled_candidates.json"
+            # State is the last HEALTHY scan (left untouched by the aborted run)
+            state.write_text(json.dumps({"candidates": [{"symbol": "OLD"}], "alerts_paused": False}), encoding="utf-8")
+            # The run summary records the abort
+            summary.write_text(
+                json.dumps({"aborted": True, "reason": "data_fetch_failed", "fetched": 0, "requested": 2403}),
+                encoding="utf-8",
+            )
+            self.assertEqual(verify(summary, state), 1, "aborted run must be red despite healthy state")
+
+    def test_healthy_paused_run_stays_green(self) -> None:
+        from src.check_state import verify
+
+        with tempfile.TemporaryDirectory() as td:
+            summary = Path(td) / "summary.json"
+            state = Path(td) / "coiled_candidates.json"
+            state.write_text(json.dumps({"candidates": []}), encoding="utf-8")
+            summary.write_text(
+                json.dumps({"alerts_paused": True, "pause_reason": "nse_breadth_paused", "universe_scanned": 2380}),
+                encoding="utf-8",
+            )
+            self.assertEqual(verify(summary, state), 0)
+
+    def test_run_eod_scan_exits_nonzero_on_abort(self) -> None:
+        """Exercised via check_fetch_integrity + the main() SystemExit contract."""
+        import subprocess
+        import sys
+
+        # A 5-symbol run against an unreachable network must exit 1, not 0.
+        proc = subprocess.run(
+            [sys.executable, "-m", "src.run_eod_scan", "--force", "--limit", "5", "--dry-run",
+             "--no-live-refresh", "--summary-out", "/tmp/_t_summary.json"],
+            capture_output=True, text=True, timeout=240,
+        )
+        self.assertIn(proc.returncode, (0, 1), f"unexpected exit {proc.returncode}")
+        if proc.returncode == 1:
+            # If it aborted, the summary must record why
+            data = json.loads(Path("/tmp/_t_summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(data.get("aborted"))

@@ -470,6 +470,11 @@ def main() -> None:
         action="store_true",
         help="Include today's incomplete intraday bar if run before 15:30 IST (default: strip incomplete bar)",
     )
+    parser.add_argument(
+        "--summary-out",
+        default=None,
+        help="Write the run summary JSON here (used by CI to detect a data-integrity abort)",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -482,6 +487,19 @@ def main() -> None:
         include_live_bar=args.include_live_bar,
     )
     print(json.dumps(summary, indent=2))
+
+    # Persist the run summary so the post-run verifier can distinguish
+    # "healthy scan with 0 candidates" from "aborted on a data outage".
+    if args.summary_out:
+        out = Path(args.summary_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    # A data-integrity abort must turn the job RED. Returning 0 here is what
+    # previously let an entire week of runs look successful while producing
+    # nothing. A guard pause is legitimate, so it stays green (but summarised).
+    if summary.get("aborted"):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

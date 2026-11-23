@@ -45,10 +45,12 @@ jobs:
           TELEGRAM_CHAT_ID_2: ${{ secrets.TELEGRAM_CHAT_ID_2 }}
           PYTHONPATH: ${{ github.workspace }}
         run: |
+          mkdir -p output
+          SUMMARY="output/scan_summary.json"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            python -m src.run_eod_scan --force
+            python -m src.run_eod_scan --force --summary-out "$SUMMARY"
           else
-            python -m src.run_eod_scan
+            python -m src.run_eod_scan --summary-out "$SUMMARY"
           fi
 
       - name: Verify scan state
@@ -57,7 +59,7 @@ jobs:
         if: always()
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m src.check_state --path state/coiled_candidates.json
+        run: python -m src.check_state --summary output/scan_summary.json --path state/coiled_candidates.json
 
       - name: Upload generated Daily Charts
         if: always()

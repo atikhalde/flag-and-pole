@@ -25,7 +25,7 @@ from src.data_fetcher import fetch_daily_batch, fetch_nifty_benchmark
 from src.live_triggers import evaluate_live_daily_triggers
 from src.market_hours import is_nse_market_open, now_ist
 from src.pattern_detector import detect_daily_pattern, evaluate_nifty_regime
-from src.run_visibility import publish_pause, write_job_summary
+from src.run_visibility import publish_abort, publish_pause, write_job_summary
 from src.telegram_notifier import TelegramNotifier
 from src.universe import load_custom_watchlist
 
@@ -166,6 +166,41 @@ def run_live_scan(
         repair_nan_today=bool(cfg["fetcher"].get("repair_nan_today_with_15m", True)),
     )
 
+    # --- Data-integrity guard -----------------------------------------------
+    # During market hours a Yahoo outage previously looked EXACTLY like a quiet
+    # session ("0 triggers fired"), so a missed breakout was indistinguishable
+    # from no breakout. Detect and surface it instead of reporting calm.
+    f_cfg = cfg.get("fetcher", {}) or {}
+    min_live_pct = float(f_cfg.get("min_fetch_success_pct", 50.0))
+    expected = len(all_syms)
+    got = len(daily_map)
+    fetched_pct = (got / expected * 100.0) if expected else 100.0
+    if expected and (got == 0 or fetched_pct < min_live_pct):
+        msg = (
+            f"Only {got}/{expected} monitored symbols fetched ({fetched_pct:.1f}%) — "
+            f"live triggers could not be evaluated reliably"
+        )
+        publish_abort(msg, {"fetched": got, "requested": expected})
+        logger.error("Live scan DEGRADED: %s", msg)
+        write_job_summary(
+            "⛔ Stage-2 live scan degraded",
+            f"- {msg}\n- **No triggers were evaluated** for this tick.\n",
+        )
+        return {
+            "skipped": True,
+            "aborted": True,
+            "reason": "data_fetch_failed",
+            "fetched": got,
+            "requested": expected,
+        }
+    if fetched_pct < 100.0:
+        logger.warning(
+            "Live scan partially degraded: %d/%d symbols fetched (%.1f%%). Scanning the remainder.",
+            got,
+            expected,
+            fetched_pct,
+        )
+
     # For custom watchlist symbols not already in coiled_candidates.json, evaluate prior-day V2.1 daily pattern
     min_wl_score = float(cfg["scoring"]["min_watchlist_score"])
     for sym in custom_syms:
@@ -282,6 +317,10 @@ def main() -> None:
     cfg = load_config(args.config)
     summary = run_live_scan(cfg=cfg, force=args.force, dry_run=args.dry_run)
     print(json.dumps(summary, indent=2))
+
+    # A degraded tick (data outage) must go red; a quiet or market-closed tick must not.
+    if summary.get("aborted"):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
