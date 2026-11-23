@@ -125,11 +125,12 @@ class TestFetchIntegrityBreaker(unittest.TestCase):
     def test_total_outage_aborts(self) -> None:
         abort, reason = check_fetch_integrity(0, 2400, self.cfg)
         self.assertTrue(abort)
-        self.assertIn("integrity floor", reason)
+        self.assertIn("Zero", reason)
 
     def test_partial_outage_aborts(self) -> None:
-        abort, _ = check_fetch_integrity(100, 2400, self.cfg)
+        abort, reason = check_fetch_integrity(100, 2400, self.cfg)
         self.assertTrue(abort)
+        self.assertIn("floor", reason)
 
     def test_healthy_run_passes(self) -> None:
         abort, _ = check_fetch_integrity(2380, 2400, self.cfg)
@@ -143,6 +144,24 @@ class TestFetchIntegrityBreaker(unittest.TestCase):
     def test_zero_requested_aborts(self) -> None:
         abort, _ = check_fetch_integrity(0, 0, self.cfg)
         self.assertTrue(abort)
+
+    def test_small_but_complete_universe_passes(self) -> None:
+        """Regression: a 100% successful fetch must never abort just for being small."""
+        abort, reason = check_fetch_integrity(63, 63, self.cfg)
+        self.assertFalse(abort, f"63/63 (100%) must pass, got: {reason}")
+
+    def test_small_universe_at_exactly_half_passes(self) -> None:
+        abort, _ = check_fetch_integrity(60, 120, self.cfg)
+        self.assertFalse(abort)
+
+    def test_large_request_few_fetched_aborts(self) -> None:
+        abort, _ = check_fetch_integrity(5, 2403, self.cfg)
+        self.assertTrue(abort)
+
+    def test_zero_fetched_always_aborts(self) -> None:
+        for req in (1, 50, 2403):
+            abort, _ = check_fetch_integrity(0, req, self.cfg)
+            self.assertTrue(abort, f"0/{req} must abort")
 
 
 class TestStaleBreadthHandling(unittest.TestCase):
@@ -284,3 +303,107 @@ class TestAbortIsActuallyRed(unittest.TestCase):
             # If it aborted, the summary must record why
             data = json.loads(Path("/tmp/_t_summary.json").read_text(encoding="utf-8"))
             self.assertTrue(data.get("aborted"))
+
+
+class TestDetectionIndependentOfGuard(unittest.TestCase):
+    """
+    Regression: `detect_daily_pattern` returns None when the breadth it is handed
+    is under the floor. Stage-1 used to pass the LIVE breadth value, so a
+    weak-breadth day detected nothing and wrote an empty watchlist — destroying
+    the very list the guard-ordering fix existed to preserve.
+    """
+
+    def setUp(self) -> None:
+        self.cfg = load_config()
+
+    def test_detector_self_gates_on_low_breadth(self) -> None:
+        """Documents the upstream behaviour we must NOT feed a tripped value into."""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_detector import _make_nifty_df, _make_synthetic_flag_df
+        from src.pattern_detector import detect_daily_pattern
+
+        df = _make_synthetic_flag_df(base_days=6, pole_days=2)
+        nifty = _make_nifty_df(df.index, ret20_pct=2.0, ret63_pct=6.0)
+
+        low, _ = detect_daily_pattern("X", "X", df, self.cfg, nifty_df=nifty, breadth50_pct=10.0)
+        self.assertIsNone(low, "detector rejects setups under the breadth floor")
+
+        ok, _ = detect_daily_pattern("X", "X", df, self.cfg, nifty_df=nifty, breadth50_pct=62.0)
+        self.assertIsNotNone(ok, "detector accepts setups above the breadth floor")
+
+    def test_eod_detection_uses_floor_not_live_breadth(self) -> None:
+        """A tripped guard must still populate the watchlist."""
+        import sys
+        from pathlib import Path
+
+        import pandas as pd
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_detector import _make_nifty_df, _make_synthetic_flag_df
+
+        df = _make_synthetic_flag_df(base_days=6, pole_days=2)
+        df.index = pd.bdate_range(end="2026-11-20", periods=len(df))
+        nifty = _make_nifty_df(df.index, ret20_pct=2.0, ret63_pct=6.0)
+        # A single rising stock is 100% above its own 50-SMA and could never trip a
+        # breadth threshold, so include a genuinely declining name (a plain downtrend
+        # — the flag builder still ends above its 50-SMA, so it cannot be reused here).
+        n = len(df)
+        import numpy as np
+
+        declining = np.linspace(400.0, 200.0, n)
+        dud = pd.DataFrame(
+            {
+                "Open": declining,
+                "High": declining * 1.01,
+                "Low": declining * 0.99,
+                "Close": declining,
+                "Volume": np.full(n, 3e5),
+            },
+            index=df.index,
+        )
+        universe = {"SETUP0": df, "DUD0": dud}
+
+        import src.run_eod_scan as eod
+
+        cfg = load_config()
+        # Open the NIFTY guard but trip the breadth guard hard
+        cfg["regime"]["min_nifty_20d_return_pct"] = -99.0
+        cfg["regime"]["min_nse_breadth50_pct"] = 99.9
+        # The breadth guard is only enforced once >= min_breadth_universe symbols
+        # load, so relax that here rather than fabricating 30 frames.
+        cfg["regime"]["min_breadth_universe"] = 1
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            cfg["runtime"]["state_dir"] = str(td / "state")
+            cfg["runtime"]["charts_dir"] = str(td / "charts")
+            (td / "state").mkdir()
+            (td / "charts").mkdir()
+            cfg["universe"]["custom_watchlist_abs"] = str(td / "none.txt")
+            (td / "none.txt").write_text("", encoding="utf-8")
+
+            orig = (eod.fetch_daily_batch, eod.fetch_nifty_benchmark, eod.fetch_nse_universe)
+            eod.fetch_daily_batch = lambda symbols, **kw: {s: universe[s] for s in symbols if s in universe}
+            eod.fetch_nifty_benchmark = lambda **kw: nifty
+            eod.fetch_nse_universe = lambda **kw: (list(universe), {s: s for s in universe})
+            try:
+                summary = eod.run_eod_scan(
+                    cfg=cfg, force=True, limit=0, dry_run=True, no_live_refresh=True
+                )
+            finally:
+                eod.fetch_daily_batch, eod.fetch_nifty_benchmark, eod.fetch_nse_universe = orig
+
+            self.assertTrue(summary.get("alerts_paused"), "guard must trip at 99.9%")
+            self.assertEqual(summary.get("alert_count"), 0, "no alerts while paused")
+            self.assertGreaterEqual(
+                summary.get("watchlist_count", 0), 1,
+                "paused day must STILL save a non-empty watchlist",
+            )
+
+            state = json.loads((td / "state" / "coiled_candidates.json").read_text(encoding="utf-8"))
+            self.assertTrue(state.get("alerts_paused"))
+            self.assertEqual(state.get("pause_reason"), "nse_breadth_paused")
+            self.assertGreaterEqual(len(state.get("candidates", [])), 1, "candidates must not be wiped")

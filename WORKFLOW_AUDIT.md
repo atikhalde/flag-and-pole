@@ -296,6 +296,65 @@ download, then exits before the long scan). `backtest-report` now `needs: prefli
 
 ---
 
+## 4c. Third pass — dry run findings
+
+Running the pipeline offline end-to-end (synthetic data, real code) surfaced **two more real bugs**,
+one of which meant the headline Stage-1 fix still did not work.
+
+### 🔴 F5 — A tripped breadth guard still wiped the watchlist (fixed)
+
+The reordering in §4/P3 was supposed to keep detection independent of the guard. It did not:
+`detect_daily_pattern` **self-gates** on the breadth value it is given and returns `None` when that
+value is under the floor. Stage-1 was passing the *live* reading (`32.8`), so every setup was
+rejected and the paused day still wrote `candidates: []` — exactly the bug the reordering existed to
+remove. Stage-2 had the same flaw for custom-watchlist scoring.
+
+**Fixed:** detection now receives the configured *floor* (always satisfied), never the live reading.
+The guard is applied strictly downstream, to decide dispatch. Both stages had the issue.
+
+```
+before:  paused run -> watchlist_count = 0    (candidates wiped)
+after :  paused run -> watchlist_count = 3    (candidates preserved, alerts suppressed)
+```
+
+### 🟠 F6 — The integrity floor aborted perfectly healthy small runs (fixed)
+
+`min_fetched_symbols: 100` was applied to the *absolute* count, so a 63-symbol universe that fetched
+**63/63 (100%)** aborted with the self-contradictory message
+`Only 63/63 symbols fetched (100.0%) — below the ... floor`.
+
+**Fixed:** the coverage check (`<50%`) always applies; the absolute floor now only applies when a
+large universe was requested:
+
+```python
+if requested >= max(min_abs * 2, 200) and fetched < min_abs:  # absolute floor
+```
+
+| fetched/requested | result |
+|---|---|
+| 0 / 2403 | abort |
+| 63 / 63 (100%) | pass |
+| 100 / 2403 | abort |
+| 5 / 2403 | abort |
+| 60 / 120 (50%) | pass |
+| 2380 / 2403 | pass |
+
+### Verification harness
+
+`scripts/dryrun.py` drives Stage-1 → Stage-2 → Stage-3 offline with synthetic data, patching **only**
+the network boundary. It asserts 19 invariants (detection, dud rejection, schema, trade-plan
+ordering, chart rendering, live trigger firing, real `%PDF-` output).
+
+```
+DRY RUN: 19/19 checks passed
+```
+
+---
+
+---
+
+---
+
 ## 5. Recommended priority
 
 | # | Action | Effort | Impact |
@@ -308,6 +367,8 @@ download, then exits before the long scan). `backtest-report` now `needs: prefli
 | 6 | `git add -A state/` | 2 min | Fixes the observed commit-step failure class |
 | 7 | External scheduler for Stage 2 ticks | 1–2 h | 16% → reliable intraday coverage |
 | 8 | Review latest Stage 3 PDF trade count | 15 min | Confirms backtest integrity |
+
+---
 
 ---
 
@@ -325,7 +386,7 @@ inspection:
 
 | Check | Result |
 |---|---|
-| Tests | **37 passed** (was 10) |
+| Tests | **43 passed** (was 10) |
 | pyflakes | clean |
 | All 5 CLI entry points `--help` | OK |
 | All 18 modules import | OK |
@@ -334,6 +395,8 @@ inspection:
 | Guard pause → green build | `verify_exit=0` |
 | Market closed → green build | `verify_exit=0` |
 | Outage → state preserved | byte-identical ✅ |
+| Offline end-to-end dry run | **19/19 checks** (`scripts/dryrun.py`) |
+| Paused day keeps watchlist | 3 candidates preserved, 0 alerts |
 
 The single most important lesson from the second pass: **a fix that reports success without
 proving it is the same bug in a new costume.** The first abort fix looked correct and was not.
