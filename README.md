@@ -48,9 +48,72 @@ Upgraded to **V2.1 Core + Coil** using a strict In-Sample (`2022–2024`) → Bl
 
 | Stage | Workflow | Schedule (IST) | What It Does |
 |---|---|---|---|
-| **Stage 1 (EOD)** | `.github/workflows/eod_scanner.yml` | **15:45 IST** Mon–Fri (+ manual run) | Checks NIFTY 50 regime + computes live **NSE Breadth50** across all **~2,403 NSE EQ stocks** (`15mo` Daily OHLCV, 0 extra API calls), saves V2.1 Grade A/A+ setups to `state/coiled_candidates.json`, commits state, and sends **Telegram EOD Digest + Annotated Chart PNGs** for brand-new setups. |
-| **Stage 2 (Live)** | `.github/workflows/live_scanner.yml` | **Every 15 mins**, 09:15–15:30 IST Mon–Fri | Checks NIFTY 50 regime & EOD Breadth50 guard, monitors `state/coiled_candidates.json` (+ `config/custom_watchlist.txt`) on today's live forming Daily candle (`1d` with automatic NaN-today repair) for **Gap-and-Go**, **Breakout Trigger**, **Spring Retest**, and **Tight Coil Watch**. |
+| **Stage 1 (EOD)** | `.github/workflows/eod_scanner.yml` | **15:47 IST** Mon–Fri (+ manual run) | Checks NIFTY 50 regime + computes live **NSE Breadth50** across all **~2,403 NSE EQ stocks** (`15mo` Daily OHLCV, 0 extra API calls), saves V2.1 Grade A/A+ setups to `state/coiled_candidates.json`, commits state, and sends **Telegram EOD Digest + Annotated Chart PNGs** for brand-new setups. |
+| **Stage 2 (Live)** | `.github/workflows/live_scanner.yml` | **Every 10 mins**, 09:17–15:33 IST Mon–Fri | Checks NIFTY 50 regime & EOD Breadth50 guard, monitors `state/coiled_candidates.json` (+ `config/custom_watchlist.txt`) on today's live forming Daily candle (`1d` with automatic NaN-today repair) for **Gap-and-Go**, **Breakout Trigger**, **Spring Retest**, and **Tight Coil Watch**. |
 | **Stage 3 (Backtest)** | `.github/workflows/backtest_scanner.yml` | Manual (`workflow_dispatch`) | Runs zero-look-ahead V2.1 walk-forward historical backtest (`6mo`–`5y`, automatic +1y warmup + `^NSEI` + point-in-time `Breadth50` series) across NSE equities, logs every **Pole, Entry, Breakout, SL, TP1, TP2 & TP3 Date**, generates a multi-page **Executive PDF Report** (Gross + Net of 0.25% NSE costs), uploads artifacts, and sends the PDF to Telegram. |
+
+---
+
+## Reliability Model
+
+Three things used to make the automation *look* healthy while producing nothing. Each is now handled
+explicitly.
+
+### 1. Scheduling reliability
+
+GitHub's `schedule` trigger is **best-effort**: runs are queued behind other work, frequently delayed
+by minutes-to-hours, and dropped outright when a slot is missed (there is no catch-up). An audit of
+this repo found Stage-2's `*/15` cron delivering only **~16%** of its ticks, none inside market hours.
+
+Mitigations in place:
+
+- Ticks are offset **off the `:00/:15/:30/:45` boundaries**, which are GitHub's busiest slots
+  (`7,17,27,37,47,57 4-9 * * 1-5`).
+- Stage-2 checks the NSE market state on every run, so a late tick is skipped rather than mis-firing.
+- Each run writes the cron slot and actual dispatch time to the **job summary**, so drift is visible.
+- For dependable intraday cadence, add an **external scheduler** (cron-job.org, Cloudflare Worker,
+  AWS EventBridge) that calls `workflow_dispatch` at the exact times. Keep `schedule` as a fallback:
+
+```bash
+gh workflow run live_scanner.yml --ref main
+```
+
+### 2. Guards suppress alerts, not detection
+
+*Previously:* tripping the breadth guard returned early and wrote `candidates: []`. That threw away
+the day's watchlist **and** handed Stage-2 a `breadth_ok: false` which kept live scanning muted long
+after the market recovered.
+
+*Now:* Stage-1 always computes and persists the watchlist. The guard suppresses **alert dispatch only**,
+and the state record carries `alerts_paused` / `pause_reason`. A tripped guard is announced on Telegram
+(`telegram.notify_on_guard_pause`) and in the job summary, so "paused" can never be mistaken for
+"no setups found".
+
+Stage-2 additionally ignores a **stale** breadth flag (> 4 days old, tolerating a long weekend) and
+falls back to the fresh NIFTY 50 regime guard instead of staying muted forever.
+
+### 3. Data-integrity circuit breaker
+
+*Previously:* a Yahoo/NSE outage or throttled run logged `Fetched 0 / 2403 symbols` and then overwrote a
+good `coiled_candidates.json` with an empty watchlist, committing it.
+
+*Now:* the run **aborts, leaves state untouched, and fails the workflow red** when fewer than
+`fetcher.min_fetch_success_pct` (default `50%`) or `fetcher.min_fetched_symbols` (default `100`) could be
+fetched. Small `--limit` test runs are exempt. `python -m src.check_state` converts the soft abort into a
+non-zero exit so the Actions UI shows a failure rather than a false green.
+
+### 4. Repeat-alert policy
+
+`deduplication.strict_never_repeat_symbol: true` together with `repeat_cooldown_days: 20` gives a
+**cooldown** policy: a symbol is suppressed for 20 days after alerting, then becomes eligible again for a
+genuinely new setup. Set `repeat_cooldown_days: 0` for the old once-per-lifetime behaviour, or
+`strict_never_repeat_symbol: false` to deduplicate per `(symbol, trigger)`.
+
+> The lifetime behaviour is what previously left Stage-2 permanently muted: `BOROLTD` alerted on
+> 2026-11-17 and was then skipped on every subsequent run, forever.
+
+Dependencies are pinned with `~=` compatible-release bounds so an upstream major version cannot silently
+break all three workflows.
 
 ---
 
@@ -69,7 +132,7 @@ Upgraded to **V2.1 Core + Coil** using a strict In-Sample (`2022–2024`) → Bl
 ```bash
 pip install -r requirements.txt
 
-# 1. Run unit tests (8/8 covering all V2.1 gates, Breadth50, Option A Daily-Close SL, multi-bot, dedup & PDF)
+# 1. Run unit tests (34/34 covering all V2.1 gates, Breadth50, Option A Daily-Close SL, multi-bot, dedup, data-integrity & PDF)
 python -m unittest discover -s tests -v
 
 # 2. Validate V2.1 Core + Coil on BOROLTD (pre-breakout 13 Nov + live breakout 16 Nov)

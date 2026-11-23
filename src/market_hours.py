@@ -81,7 +81,6 @@ def expected_intraday_volume_fraction(elapsed_minutes: float) -> float:
     """
     if elapsed_minutes <= 5:
         return 0.08
-    frac_linear = elapsed_minutes / SESSION_TOTAL_MINUTES
     # Blend linear with mild front-loaded U-shape curve
     if elapsed_minutes <= 45:
         return max(0.10, 0.08 + (elapsed_minutes / 45.0) * 0.16)

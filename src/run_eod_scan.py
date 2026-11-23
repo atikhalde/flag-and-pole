@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 
-from src.alert_ledger import AlertLedger
+from src.alert_ledger import ledger_from_config
 from src.chart_generator import generate_pattern_chart
 from src.config_loader import load_config
 from src.data_fetcher import fetch_daily_batch, fetch_daily_single, fetch_nifty_benchmark
@@ -35,6 +35,7 @@ from src.pattern_detector import (
     detect_daily_pattern,
     evaluate_nifty_regime,
 )
+from src.run_visibility import publish_abort, publish_pause, write_job_summary
 from src.telegram_notifier import TelegramNotifier
 from src.universe import fetch_nse_universe
 from src.volume_profile import DailyVolumeProfile
@@ -45,6 +46,41 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("eod_scanner")
+
+
+def check_fetch_integrity(
+    fetched: int,
+    requested: int,
+    cfg: Dict[str, Any],
+    limit: int = 0,
+) -> Tuple[bool, str]:
+    """
+    Decide whether a run should ABORT rather than commit an empty/degraded watchlist.
+
+    Returns (should_abort, human_readable_reason). Skipped entirely for small
+    `--limit` test runs so local smoke tests on 5 symbols still work.
+    """
+    f_cfg = (cfg or {}).get("fetcher", {}) or {}
+    min_pct = float(f_cfg.get("min_fetch_success_pct", 50.0))
+    min_abs = int(f_cfg.get("min_fetched_symbols", 100))
+
+    if requested <= 0:
+        return True, "No symbols requested from the NSE universe"
+
+    # Small explicit test runs are exempt from the absolute floor.
+    if limit and requested <= max(limit, 1) and requested < min_abs:
+        if fetched == 0:
+            return True, f"Zero of {requested} requested symbols returned data"
+        return False, ""
+
+    pct = fetched / requested * 100.0
+    if fetched < min_abs or pct < min_pct:
+        return (
+            True,
+            f"Only {fetched}/{requested} symbols fetched ({pct:.1f}%) — below the "
+            f"{min_pct:.0f}% / {min_abs}-symbol integrity floor",
+        )
+    return False, ""
 
 
 def strip_incomplete_today_bar(df: pd.DataFrame, cutoff_date: date) -> Tuple[pd.DataFrame, bool]:
@@ -113,29 +149,13 @@ def run_eod_scan(
     state_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / "coiled_candidates.json"
 
-    if not regime["regime_ok"]:
-        logger.warning(
-            "V2 NIFTY Regime Guard PAUSED scan: NIFTY 20d return %.2f%% < %.2f%% threshold. Skipping alerts.",
-            regime["ret20_pct"],
-            float(r_cfg.get("min_nifty_20d_return_pct", -3.0)),
-        )
-        state_obj = {
-            "version": "V2.1 Core + Coil",
-            "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
-            "scan_date": regime.get("as_of") or now.strftime("%Y-%m-%d"),
-            "dropped_incomplete_live_bar": drop_incomplete_today,
-            "universe_scanned": 0,
-            "nifty_regime": regime,
-            "candidates": [],
-        }
-        state_file.write_text(json.dumps(state_obj, indent=2), encoding="utf-8")
-        return {
-            "skipped": True,
-            "reason": "nifty_regime_paused",
-            "nifty_regime": regime,
-            "watchlist_count": 0,
-            "alert_count": 0,
-        }
+    # NOTE ON ORDERING (important):
+    # Detection is deliberately run BEFORE the breadth gate decides whether to
+    # dispatch alerts. Pausing on breadth used to return early and write
+    # `candidates: []`, which (a) threw away that day's watchlist and (b) handed
+    # Stage-2 a stale/false "breadth_ok: false" that kept live scanning muted
+    # long after the market recovered. Now the watchlist is always refreshed;
+    # only the *alert dispatch* is suppressed while the guards are tripped.
 
     symbols, name_map = fetch_nse_universe(
         nse_url=u_cfg["nse_equity_csv_url"],
@@ -156,6 +176,26 @@ def run_eod_scan(
         repair_nan_today=False,  # Fast bulk pass; we repair surviving hits individually
     )
     logger.info("Fetched clean Daily OHLCV for %d / %d symbols in %.1fs", len(daily_map), len(symbols), time.time() - t0)
+
+    # --- Data-integrity circuit breaker -------------------------------------
+    # A Yahoo/NSE outage or a throttled run must never overwrite a good
+    # watchlist with an empty one. Abort loudly, leaving state untouched.
+    abort, abort_reason = check_fetch_integrity(
+        fetched=len(daily_map),
+        requested=len(symbols),
+        cfg=cfg,
+        limit=limit,
+    )
+    if abort:
+        publish_abort(abort_reason, {"fetched": len(daily_map), "requested": len(symbols)})
+        logger.error("ABORTING scan: %s — state left untouched.", abort_reason)
+        return {
+            "skipped": True,
+            "aborted": True,
+            "reason": "data_fetch_failed",
+            "fetched": len(daily_map),
+            "requested": len(symbols),
+        }
 
     if drop_incomplete_today:
         stripped_count = 0
@@ -193,31 +233,29 @@ def run_eod_scan(
     regime["nse_breadth_total"] = breadth_info["total_count"]
     regime["breadth_ok"] = breadth_info["breadth_ok"]
 
-    if not breadth_info["breadth_ok"]:
+    # Guards suppress ALERT DISPATCH only — detection below still runs so the
+    # watchlist handed to Stage-2 is always current.
+    pause_reason: str | None = None
+    pause_info: Dict[str, Any] = {}
+    if not regime["regime_ok"]:
+        pause_reason = "nifty_regime_paused"
+        pause_info = {"ret20_pct": regime.get("ret20_pct"), "min_ret20_pct": float(r_cfg.get("min_nifty_20d_return_pct", -3.0))}
         logger.warning(
-            "V2.1 NSE Breadth50 Guard PAUSED scan: %.1f%% (< %.1f%% threshold). Skipping breakout alerts in bear breadth.",
-            breadth_info["breadth50_pct"],
-            breadth_info["min_threshold_pct"],
+            "V2 NIFTY Regime Guard TRIPPED: NIFTY 20d return %.2f%% < %.2f%% threshold. Watchlist will still refresh; alerts suppressed.",
+            regime["ret20_pct"] if regime["ret20_pct"] is not None else float("nan"),
+            float(r_cfg.get("min_nifty_20d_return_pct", -3.0)),
         )
-        state_obj = {
-            "version": "V2.1 Core + Coil",
-            "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
-            "scan_date": breadth_info.get("as_of") or regime.get("as_of") or now.strftime("%Y-%m-%d"),
-            "dropped_incomplete_live_bar": drop_incomplete_today,
-            "universe_scanned": len(daily_map),
-            "nifty_regime": regime,
-            "nse_breadth50": breadth_info,
-            "candidates": [],
+    elif not breadth_info["breadth_ok"]:
+        pause_reason = "nse_breadth_paused"
+        pause_info = {
+            "breadth50_pct": breadth_info.get("breadth50_pct"),
+            "min_threshold_pct": breadth_info.get("min_threshold_pct", 40.0),
         }
-        state_file.write_text(json.dumps(state_obj, indent=2), encoding="utf-8")
-        return {
-            "skipped": True,
-            "reason": "nse_breadth_paused",
-            "nifty_regime": regime,
-            "nse_breadth50": breadth_info,
-            "watchlist_count": 0,
-            "alert_count": 0,
-        }
+        logger.warning(
+            "V2.1 NSE Breadth50 Guard TRIPPED: %.1f%% (< %.1f%% threshold). Watchlist will still refresh; alerts suppressed.",
+            breadth_info["breadth50_pct"] if breadth_info["breadth50_pct"] is not None else float("nan"),
+            breadth_info.get("min_threshold_pct", 40.0),
+        )
 
     # Detect V2.1 Core + Coil pure Daily chart patterns (strictly <= 20 trading days + 11 institutional gates)
     min_wl_score = float(s_cfg["min_watchlist_score"])
@@ -275,36 +313,42 @@ def run_eod_scan(
         "universe_scanned": len(daily_map),
         "nifty_regime": regime,
         "nse_breadth50": breadth_info,
+        "alerts_paused": pause_reason is not None,
+        "pause_reason": pause_reason,
         "candidates": candidates_payload,
     }
     state_file.write_text(json.dumps(state_obj, indent=2), encoding="utf-8")
     logger.info("Saved %d qualified V2.1 coiled candidates to %s", len(candidates_payload), state_file)
 
-    # Filter setups that meet EOD Telegram alert threshold (Grade A/A+ >= 66) AND have NEVER been alerted before
+    # Filter setups that meet EOD Telegram alert threshold (Grade A/A+ >= 66) AND are eligible to alert
     min_alert_score = float(s_cfg["min_eod_alert_score"])
     eligible_items = [m for m in matched if m[0].total_score >= min_alert_score]
     max_charts = int(s_cfg["max_eod_chart_alerts"])
 
-    strict_dedup = bool(cfg.get("deduplication", {}).get("strict_never_repeat_symbol", True))
-    ledger = AlertLedger(state_dir / "sent_alerts.json")
+    ledger = ledger_from_config(cfg, state_dir)
 
     alert_items = []
-    skipped_already_sent: List[str] = []
+    suppressed: List[str] = []
     seen_this_run: set[str] = set()
     for item in eligible_items:
         sym_key = item[0].symbol.strip().upper()
-        if sym_key in seen_this_run or (strict_dedup and ledger.is_sent(sym_key)):
-            skipped_already_sent.append(sym_key)
+        if sym_key in seen_this_run or not ledger.is_eligible(sym_key, "PRE_BREAKOUT", now=now):
+            suppressed.append(sym_key)
             continue
         seen_this_run.add(sym_key)
         alert_items.append(item)
 
-    if skipped_already_sent:
+    if suppressed:
         logger.info(
-            "Strict dedup skipped %d already-alerted symbol(s): %s",
-            len(skipped_already_sent),
-            ", ".join(skipped_already_sent),
+            "Dedup suppressed %d symbol(s) (policy=%s): %s",
+            len(suppressed),
+            ledger.policy_label,
+            ", ".join(suppressed),
         )
+
+    # A tripped guard suppresses dispatch but NOT detection (see ordering note above).
+    if pause_reason is not None:
+        alert_items = []
 
     notifier = TelegramNotifier(
         bot_token=cfg["runtime"]["telegram_bot_token"],
@@ -360,28 +404,55 @@ def run_eod_scan(
     if not dry_run:
         ledger.save()
 
+    # Make a paused guard visible instead of indistinguishable from "no setups".
+    if pause_reason is not None:
+        pause_desc = publish_pause(
+            pause_reason,
+            pause_info,
+            notifier=notifier,
+            enabled=bool(t_cfg.get("notify_on_guard_pause", True)),
+        )
+        write_job_summary(
+            "Stage-1 EOD scan — watchlist refreshed, alerts paused",
+            f"- {pause_desc}\n"
+            f"- **{len(candidates_payload)}** candidate(s) still saved to `state/coiled_candidates.json`\n"
+            f"- Stage-2 live monitoring stays current and will resume the moment the guard clears\n",
+        )
+    else:
+        write_job_summary(
+            "Stage-1 EOD scan — complete",
+            f"- Candidates: **{len(candidates_payload)}**\n"
+            f"- New alerts: **{len(newly_alerted)}**\n"
+            f"- Breadth50: **{breadth_info['breadth50_pct']:.1f}%**\n"
+            if breadth_info["available"]
+            else f"- Candidates: **{len(candidates_payload)}**\n",
+        )
+
     elapsed = time.time() - t0
     logger.info(
-        "Stage-1 V2.1 EOD Scan complete in %.1fs | Scanned=%d | Breadth50=%s | Watchlist=%d | NewAlerts=%d | SkippedDup=%d | Charts=%d",
+        "Stage-1 V2.1 EOD Scan complete in %.1fs | Scanned=%d | Breadth50=%s | Watchlist=%d | NewAlerts=%d | SuppressedDup=%d | Charts=%d | Paused=%s",
         elapsed,
         len(daily_map),
         f"{breadth_info['breadth50_pct']:.1f}%" if breadth_info["available"] else "N/A",
         len(candidates_payload),
         len(newly_alerted),
-        len(skipped_already_sent),
+        len(suppressed),
         len(charts_generated),
+        pause_reason or "no",
     )
     return {
-        "skipped": False,
+        "skipped": pause_reason is not None,
         "scan_date": scan_date,
         "dropped_incomplete_live_bar": drop_incomplete_today,
         "universe_scanned": len(daily_map),
         "nifty_regime": regime,
         "nse_breadth50": breadth_info,
+        "alerts_paused": pause_reason is not None,
+        "pause_reason": pause_reason,
         "watchlist_count": len(candidates_payload),
         "alert_count": len(alert_items),
         "newly_alerted": newly_alerted,
-        "skipped_already_sent": skipped_already_sent,
+        "suppressed_by_dedup": suppressed,
         "top_symbols": [c["symbol"] for c in candidates_payload[:10]],
         "charts_generated": charts_generated,
     }
