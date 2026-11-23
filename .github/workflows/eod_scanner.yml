@@ -2,8 +2,11 @@ name: Stage 1 - NSE Daily EOD Flag Scanner
 
 on:
   schedule:
-    # 15:45 IST (Mon-Fri) = 10:15 UTC (15 mins after NSE market close)
-    - cron: '15 10 * * 1-5'
+    # 15:47 IST (Mon-Fri) = 10:17 UTC — ~17 min after the NSE close so the day's
+    # final 1d bar is settled. Deliberately off the :00/:15/:30/:45 boundaries,
+    # which are GitHub's busiest scheduler slots and suffer the worst delays.
+    # See README "Scheduling reliability".
+    - cron: '17 10 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -48,6 +51,14 @@ jobs:
             python -m src.run_eod_scan
           fi
 
+      - name: Verify scan state
+        # The scanner exits 0 after a data-abort so the commit step can still run
+        # and preserve state. This turns that soft abort into a visible red run.
+        if: always()
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m src.check_state --path state/coiled_candidates.json
+
       - name: Upload generated Daily Charts
         if: always()
         uses: actions/upload-artifact@v4
@@ -77,7 +88,9 @@ jobs:
             if [ -f /tmp/gh_state_out/sent_alerts.json ]; then
               python -m src.alert_ledger --merge-into state/sent_alerts.json --from /tmp/gh_state_out/sent_alerts.json
             fi
-            git add state/coiled_candidates.json state/sent_alerts.json
+            # `git add` exits 128 if a pathspec is missing, which killed this
+            # step (and failed the run) whenever a state file did not exist yet.
+            git add -A state/
             if git diff --staged --quiet; then
               echo "No state changes to commit."
               exit 0

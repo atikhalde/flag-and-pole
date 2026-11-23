@@ -1,7 +1,15 @@
-yfinance>=0.2.50
-pandas>=2.1.0
-numpy>=1.26.0
-scipy>=1.11.0
-matplotlib>=3.8.0
-requests>=2.31.0
-PyYAML>=6.0.1
+# Pinned with compatible-release (~=) specifiers so a new upstream major version
+# cannot silently break the Stage-1/2/3 GitHub Actions workflows.
+#
+# These bounds are the versions validated in CI on Python 3.11:
+#   pandas 3.x, numpy 2.x, yfinance 1.x, scipy 1.x, matplotlib 3.x
+# `~=X.Y` allows patch/minor updates inside major X but blocks the next major,
+# which is where the breaking changes historically land (pandas 2 -> 3,
+# yfinance 0.x -> 1.x, numpy 1 -> 2).
+yfinance~=1.8,>=1.8.0
+pandas~=3.1,>=3.1.0
+numpy~=2.4,>=2.4.0
+scipy~=1.17,>=1.17.0
+matplotlib~=3.11,>=3.11.0
+requests~=2.34,>=2.34.0
+PyYAML~=6.0,>=6.0.1

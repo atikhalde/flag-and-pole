@@ -20,6 +20,12 @@ fetcher:
   batch_sleep_sec: 1.0            # Polite delay between batches to avoid Yahoo throttling
   max_retries: 2
   repair_nan_today_with_15m: true # Fixes Yahoo NSE quirk where today's 1d OHLC can briefly show NaN
+  # --- Data-integrity circuit breaker -------------------------------------
+  # A Yahoo/NSE outage or throttled run used to overwrite a good
+  # coiled_candidates.json with an empty watchlist and commit it, silently
+  # killing Stage-2 monitoring until the next good scan. Abort instead.
+  min_fetch_success_pct: 50.0     # Abort (non-zero exit, state untouched) below this % of symbols fetched
+  min_fetched_symbols: 100        # Absolute floor; ignored when --limit is used for tiny test runs
 
 regime:
   # V2.1 Dual Market Regime Guard (NIFTY 50 Momentum + Live NSE Market Breadth)
@@ -123,7 +129,21 @@ telegram:
   enabled: true
   send_charts: true
   send_eod_summary_even_if_empty: false   # Stay silent when 0 brand-new unalerted stocks exist
+  # A paused guard or an aborted run used to look identical to "no setups found"
+  # because every run still went green with no output. Now the scanner announces
+  # the pause explicitly (and marks the GitHub job summary) so silence is never ambiguous.
+  notify_on_guard_pause: true             # Send a Telegram line when a regime/breadth guard pauses the scan
   tradingview_url_template: "https://www.tradingview.com/chart/?symbol=NSE%3A{symbol}"
 
 deduplication:
-  strict_never_repeat_symbol: true        # Strictly NEVER repeat the same stock symbol alert across any scan/stage/day
+  # Symbol-level repeat-alert policy.
+  #   strict_never_repeat_symbol: true  + repeat_cooldown_days: 20  -> "cooldown" (DEFAULT)
+  #   strict_never_repeat_symbol: true  + repeat_cooldown_days: 0   -> "lifetime" (legacy, once ever)
+  #   strict_never_repeat_symbol: false                             -> "per_trigger" (per symbol+trigger)
+  #
+  # NOTE: "lifetime" is what previously left Stage-2 permanently muted — BOROLTD
+  # alerted on 2026-11-17 and was then skipped on every subsequent run forever.
+  # "cooldown" keeps the anti-spam intent while letting a genuinely new setup
+  # re-qualify once 20 trading-session-days have elapsed.
+  strict_never_repeat_symbol: true
+  repeat_cooldown_days: 20                # Suppress repeats for this many calendar days

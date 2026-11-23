@@ -13,16 +13,19 @@ import argparse
 import json
 import logging
 import time
+
+import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List
 
-from src.alert_ledger import AlertLedger
+from src.alert_ledger import ledger_from_config
 from src.chart_generator import generate_pattern_chart
 from src.config_loader import load_config
 from src.data_fetcher import fetch_daily_batch, fetch_nifty_benchmark
 from src.live_triggers import evaluate_live_daily_triggers
 from src.market_hours import is_nse_market_open, now_ist
 from src.pattern_detector import detect_daily_pattern, evaluate_nifty_regime
+from src.run_visibility import publish_pause, write_job_summary
 from src.telegram_notifier import TelegramNotifier
 from src.universe import load_custom_watchlist
 
@@ -41,6 +44,23 @@ def _load_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
+
+
+def _is_breadth_stale(saved_as_of: str, scan_date: Any, max_age_days: int = 4) -> bool:
+    """
+    True when the stored Breadth50 reading is too old to drive a live decision.
+
+    `max_age_days` tolerates a long weekend/holiday cluster without flagging a
+    freshly computed Friday reading as stale on Monday.
+    """
+    txt = str(saved_as_of or "").strip()
+    if not txt:
+        return True
+    try:
+        as_of = pd.Timestamp(txt).date()
+    except Exception:
+        return True
+    return (now_ist().date() - as_of).days > int(max_age_days)
 
 
 def run_live_scan(
@@ -72,23 +92,51 @@ def run_live_scan(
     state_dir.mkdir(parents=True, exist_ok=True)
 
     candidates_file = state_dir / "coiled_candidates.json"
-    alerts_file = state_dir / "sent_alerts.json"
 
     wl_state = _load_json(candidates_file, {"candidates": []})
     saved_breadth = wl_state.get("nse_breadth50") or {}
-    if (
-        bool(r_cfg.get("enable_breadth_guard", True))
-        and saved_breadth.get("enforced")
-        and saved_breadth.get("breadth_ok") is False
-    ):
-        logger.warning(
-            "V2.1 NSE Breadth50 Guard PAUSED live triggers: EOD Breadth50=%.1f%% (< %.1f%%).",
-            saved_breadth.get("breadth50_pct", 0.0),
-            float(r_cfg.get("min_nse_breadth50_pct", 40.0)),
-        )
-        return {"skipped": True, "reason": "nse_breadth_paused", "nifty_regime": regime, "nse_breadth50": saved_breadth}
 
-    saved_br_pct = saved_breadth.get("breadth50_pct") if saved_breadth.get("enforced") else None
+    # --- Breadth guard must not act on stale data ---------------------------
+    # This used to read a breadth_ok baked into coiled_candidates.json and stay
+    # muted on it indefinitely. If Stage-1 has not run since the market turned
+    # up, that flag is stale and would keep live scanning dead. Only honour the
+    # saved flag when it is fresh (last completed session or later); otherwise
+    # log that we are deferring to the fresh NIFTY guard above.
+    breadth_guard_on = bool(r_cfg.get("enable_breadth_guard", True))
+    saved_br_as_of = str(saved_breadth.get("as_of") or wl_state.get("scan_date") or "")
+    breadth_is_stale = _is_breadth_stale(saved_br_as_of, wl_state.get("scan_date"))
+    saved_ok = saved_breadth.get("breadth_ok")
+
+    if breadth_guard_on and saved_breadth.get("enforced") and saved_ok is False:
+        if breadth_is_stale:
+            logger.warning(
+                "EOD Breadth50 flag (%.1f%%, as of %s) is STALE — not pausing live triggers on it. "
+                "Relying on the fresh NIFTY 50 regime guard for this run.",
+                float(saved_breadth.get("breadth50_pct") or 0.0),
+                saved_br_as_of or "unknown",
+            )
+        else:
+            desc = (
+                f"NSE Breadth50 {float(saved_breadth.get('breadth50_pct') or 0.0):.1f}% is below the "
+                f"{float(r_cfg.get('min_nse_breadth50_pct', 40.0)):.1f}% floor (weak broad market)"
+            )
+            logger.warning("V2.1 NSE Breadth50 Guard PAUSED live triggers: %s", desc)
+            publish_pause(
+                "nse_breadth_paused",
+                {
+                    "breadth50_pct": saved_breadth.get("breadth50_pct"),
+                    "min_threshold_pct": saved_breadth.get("min_threshold_pct", 40.0),
+                },
+                notifier=None,
+                enabled=False,
+            )
+            return {"skipped": True, "reason": "nse_breadth_paused", "nifty_regime": regime, "nse_breadth50": saved_breadth}
+
+    # When the saved reading is stale we cannot pass a trustworthy breadth into
+    # the scorer, so score without the breadth pillar rather than with a lie.
+    saved_br_pct = None
+    if saved_breadth.get("enforced") and not breadth_is_stale:
+        saved_br_pct = saved_breadth.get("breadth50_pct")
     raw_candidates: List[Dict[str, Any]] = list(wl_state.get("candidates", []))
     # Skip any stale pre-V2.1 candidates missing Option A / V2.1 schema fields
     candidates: List[Dict[str, Any]] = [
@@ -127,9 +175,9 @@ def run_live_scan(
             if setup is not None and setup.total_score >= min_wl_score:
                 cand_map[sym] = setup.to_dict()
 
-    # Load strict permanent symbol-level deduplication ledger (NEVER resets across scans or days)
-    strict_dedup = bool(cfg.get("deduplication", {}).get("strict_never_repeat_symbol", True))
-    ledger = AlertLedger(alerts_file)
+    # Load the deduplication ledger (cooldown- or lifetime-scoped; see settings.yaml)
+    ledger = ledger_from_config(cfg, state_dir)
+    logger.info("Dedup policy in force: %s", ledger.policy_label)
 
     notifier = TelegramNotifier(
         bot_token=cfg["runtime"]["telegram_bot_token"],
@@ -147,7 +195,7 @@ def run_live_scan(
 
     for sym, cand in cand_map.items():
         sym_key = sym.strip().upper()
-        if sym_key in seen_this_run or (strict_dedup and ledger.is_sent(sym_key)):
+        if sym_key in seen_this_run:
             skipped_already_sent.append(sym_key)
             continue
 
@@ -160,6 +208,12 @@ def run_live_scan(
             continue
 
         ev = events[0]
+
+        # Deduplicate on the specific trigger that actually fired.
+        if not ledger.is_eligible(sym_key, ev.trigger_type, now=now):
+            skipped_already_sent.append(sym_key)
+            continue
+
         seen_this_run.add(sym_key)
 
         ev_dict = ev.to_dict()
@@ -198,6 +252,14 @@ def run_live_scan(
         len(cand_map),
         len(fired),
         len(skipped_already_sent),
+    )
+    fired_syms = ", ".join(str(e.get("symbol")) for e in fired)
+    write_job_summary(
+        "Stage-2 Live scan — complete",
+        f"- Monitored: **{len(cand_map)}**\n"
+        f"- New triggers: **{len(fired)}**"
+        + (f" ({fired_syms})" if fired_syms else "")
+        + f"\n- Suppressed by dedup ({ledger.policy_label}): **{len(skipped_already_sent)}**\n",
     )
     return {
         "skipped": False,

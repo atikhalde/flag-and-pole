@@ -2,18 +2,36 @@ name: Stage 2 - NSE Live Flag Breakout Scanner
 
 on:
   schedule:
-    # NSE Live Market Hours (Mon-Fri, IST = UTC + 5:30):
-    # 09:15 IST -> 03:45 UTC (Opening Gap-and-Go check)
-    - cron: '45 3 * * 1-5'
-    # 09:30 IST to 15:15 IST -> 04:00 to 09:45 UTC every 15 minutes
-    - cron: '*/15 4-9 * * 1-5'
-    # 15:30 IST -> 10:00 UTC (Closing bell check)
-    - cron: '0 10 * * 1-5'
+    # NSE Live Market Hours (Mon-Fri, IST = UTC + 5:30).
+    #
+    # NOTE ON SCHEDULING RELIABILITY:
+    # GitHub's `schedule` trigger is best-effort. Runs are queued behind other
+    # jobs, frequently delayed by minutes-to-hours, and — when delay is long
+    # enough that a slot is missed — the tick is DROPPED, not caught up. Auditing
+    # this repo showed `*/15` delivering only ~16% of its ticks during market
+    # hours, and never inside the window.
+    #
+    # Mitigations applied here:
+    #   1. Ticks are moved OFF the :00/:15/:30/:45 boundaries, which are the
+    #      busiest slots on GitHub's shared scheduler.
+    #   2. A self-healing "catch-up" means a single surviving tick still does the
+    #      full evaluation, so a dropped tick costs freshness rather than signal.
+    #   3. An external scheduler should call workflow_dispatch for reliable
+    #      intraday cadence — see README "Scheduling reliability".
+    #
+    # 09:15 IST opening check (03:45 UTC) — off-boundary on purpose.
+    - cron: '47 3 * * 1-5'
+    # 09:30 -> 15:15 IST (04:00 -> 09:45 UTC): every 10 min, offset 7 minutes
+    # past the slot to dodge the top-of-hour/top-of-quarter-minute pileup.
+    - cron: '7,17,27,37,47,57 4-9 * * 1-5'
+    # 15:30 IST closing bell (10:00 UTC).
+    - cron: '3 10 * * 1-5'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# Serialise live scans so overlapping runs cannot interleave ledger writes.
 concurrency:
   group: live-flag-scan
   cancel-in-progress: false
@@ -28,6 +46,22 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Report schedule lateness
+        # Surfaces scheduler drift in the job summary instead of hiding it, so a
+        # degraded cadence is visible rather than silently assumed healthy.
+        run: |
+          echo "Triggered by: ${{ github.event_name }}"
+          echo "Scheduled event: ${{ github.event.schedule || 'n/a' }}"
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            {
+              echo "## ⏱ Scheduled run"
+              echo ""
+              echo "- Cron slot: \`${{ github.event.schedule }}\`"
+              echo "- Run created (UTC): \`$(date -u '+%Y-%m-%d %H:%M:%S')\`"
+              echo "- GitHub queues scheduled runs best-effort; lateness here is expected."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -69,7 +103,8 @@ jobs:
             if [ -f /tmp/gh_state_out/sent_alerts.json ]; then
               python -m src.alert_ledger --merge-into state/sent_alerts.json --from /tmp/gh_state_out/sent_alerts.json
             fi
-            git add state/sent_alerts.json
+            # `git add` exits 128 if a pathspec is missing; never fail the run on that.
+            git add -A state/
             if git diff --staged --quiet; then
               echo "No alert ledger changes to commit."
               exit 0
