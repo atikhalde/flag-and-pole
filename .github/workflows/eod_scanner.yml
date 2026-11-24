@@ -99,9 +99,6 @@ jobs:
           mkdir -p /tmp/gh_state_out
           [ -f state/coiled_candidates.json ] && cp state/coiled_candidates.json /tmp/gh_state_out/coiled_candidates.json
           [ -f state/sent_alerts.json ] && cp state/sent_alerts.json /tmp/gh_state_out/sent_alerts.json
-          # Dedup gate for guard-pause Telegram notices. Without this the notice
-          # repeats on every run, because each CI run checks out a fresh tree.
-          [ -f state/guard_notice.json ] && cp state/guard_notice.json /tmp/gh_state_out/guard_notice.json || true
 
           for attempt in 1 2 3; do
             git fetch origin "${{ github.ref_name }}"
@@ -112,11 +109,6 @@ jobs:
             fi
             if [ -f /tmp/gh_state_out/sent_alerts.json ]; then
               python -m src.alert_ledger --merge-into state/sent_alerts.json --from /tmp/gh_state_out/sent_alerts.json
-            fi
-            if [ -f /tmp/gh_state_out/guard_notice.json ]; then
-              cp /tmp/gh_state_out/guard_notice.json state/guard_notice.json
-            else
-              rm -f state/guard_notice.json
             fi
             # `git add` exits 128 if a pathspec is missing, which killed this
             # step (and failed the run) whenever a state file did not exist yet.

@@ -409,106 +409,6 @@ class TestDetectionIndependentOfGuard(unittest.TestCase):
             self.assertGreaterEqual(len(state.get("candidates", [])), 1, "candidates must not be wiped")
 
 
-class TestGuardNoticeDedup(unittest.TestCase):
-    """
-    Regression: the guard-pause notice fired on EVERY run. With the scheduler
-    dispatching every 15 minutes, a multi-day weak-breadth stretch produced
-    dozens of identical Telegram messages.
-    """
-
-    def _gate(self, td, **kw):
-        from src.guard_notice import GuardNoticeGate
-
-        return GuardNoticeGate(td, **kw)
-
-    def test_first_notice_is_sent(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            ok, why = self._gate(td).should_notify("nse_breadth_paused", {"breadth50_pct": 34.7})
-            self.assertTrue(ok)
-            self.assertIn("first", why)
-
-    def test_identical_repeat_is_suppressed(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            now = now_ist()
-            info = {"breadth50_pct": 34.7, "min_threshold_pct": 40.0}
-            g = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
-            self.assertTrue(g.should_notify("nse_breadth_paused", info, now=now)[0])
-            g.mark_notified("nse_breadth_paused", info, now=now)
-            g.save()
-
-            # 30 more runs, 15 minutes apart, unchanged breadth
-            for i in range(1, 30):
-                g2 = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
-                ok, why = g2.should_notify(
-                    "nse_breadth_paused", info, now=now + timedelta(minutes=15 * i)
-                )
-                self.assertFalse(ok, f"run {i} should be suppressed, got: {why}")
-
-    def test_material_metric_change_notifies(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            now = now_ist()
-            g = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
-            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
-            g.save()
-
-            g2 = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
-            # 2.5 points worse -> new information, notify
-            ok, why = g2.should_notify(
-                "nse_breadth_paused", {"breadth50_pct": 32.2},
-                now=now + timedelta(minutes=15),
-            )
-            self.assertTrue(ok)
-            self.assertIn("moved", why)
-
-    def test_sub_threshold_change_stays_quiet(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            now = now_ist()
-            g = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
-            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
-            g.save()
-
-            g2 = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
-            ok, _ = g2.should_notify(
-                "nse_breadth_paused", {"breadth50_pct": 34.9},
-                now=now + timedelta(minutes=15),
-            )
-            self.assertFalse(ok, "0.2pt drift must not re-notify")
-
-    def test_reason_change_notifies(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            now = now_ist()
-            g = self._gate(td)
-            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
-            g.save()
-
-            g2 = self._gate(td)
-            ok, why = g2.should_notify(
-                "nifty_regime_paused", {"ret20_pct": -5.0}, now=now + timedelta(minutes=15)
-            )
-            self.assertTrue(ok)
-            self.assertIn("changed", why)
-
-    def test_heartbeat_after_interval_notifies(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            now = now_ist()
-            g = self._gate(td, repeat_hours=20)
-            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
-            g.save()
-
-            g2 = self._gate(td, repeat_hours=20)
-            ok, why = g2.should_notify(
-                "nse_breadth_paused", {"breadth50_pct": 34.7}, now=now + timedelta(hours=21)
-            )
-            self.assertTrue(ok, why)
-            self.assertIn("since last notice", why)
-
-    def test_corrupt_state_does_not_mute_the_scanner(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            (Path(td) / "guard_notice.json").write_text("{not json", encoding="utf-8")
-            ok, _ = self._gate(td).should_notify("nse_breadth_paused", {"breadth50_pct": 34.7})
-            self.assertTrue(ok, "unreadable gate state must fail open, not silent")
-
-
 class TestEodOncePerSession(unittest.TestCase):
     """Regression: Stage-1 was re-scanning ~2,400 symbols every 15 minutes."""
 
@@ -556,3 +456,174 @@ class TestEodOncePerSession(unittest.TestCase):
             p = self._state(td)
             needed, why = decide(p, now=datetime(2026, 11, 28, 16, 0, tzinfo=IST))  # Saturday
             self.assertFalse(needed, why)
+
+
+class TestTelegramStockAlertsOnly(unittest.TestCase):
+    """
+    Telegram must carry STOCK alerts only. A guard pause is an operational state
+    and belongs in the Actions job summary + logs, never in the channel.
+    """
+
+    def _notifier(self):
+        from src.telegram_notifier import TelegramNotifier
+
+        # enabled=True with a real target, but we intercept the HTTP layer
+        n = TelegramNotifier(bot_token="T", chat_id="C", enabled=True)
+        self.assertTrue(n.enabled, "notifier should be enabled for this test")
+        return n
+
+    def test_is_stock_alert_accepts_stock_messages(self) -> None:
+        n = self._notifier()
+        self.assertTrue(n._is_stock_alert("🚀 LIVE GAP AND GO: RELIANCE"))
+        self.assertTrue(n._is_stock_alert("🔥 V2.1 PRE-BREAKOUT: BOROLTD"))
+        self.assertTrue(n._is_stock_alert("🎯 NSE V2.1 CORE+COIL SCAN — 3 setups"))
+
+    def test_is_stock_alert_rejects_operational_notices(self) -> None:
+        n = self._notifier()
+        for text in [
+            "⏸ Scanner paused — NSE Breadth50 34.7% is below the 40.0% floor",
+            "⛔ Scanner aborted — data integrity",
+            "No alerts were evaluated this run.",
+            "Scan paused (nse_breadth_paused)",
+            "SCANNER PAUSED",  # case-insensitive
+        ]:
+            self.assertFalse(n._is_stock_alert(text), f"should block: {text!r}")
+
+    def test_send_message_blocks_operational_notice_without_http(self) -> None:
+        """The block must happen BEFORE any network call."""
+        from unittest.mock import patch
+
+        n = self._notifier()
+        with patch("src.telegram_notifier.requests.post") as post:
+            ok = n.send_message("⏸ Scanner paused\nNSE Breadth50 34.7% is below the 40.0% floor")
+        self.assertFalse(ok)
+        post.assert_not_called()
+
+    def test_send_photo_blocks_operational_caption(self) -> None:
+        from unittest.mock import patch
+
+        n = self._notifier()
+        with patch("src.telegram_notifier.requests.post") as post:
+            ok = n.send_photo("nonexistent.png", "⏸ Scanner paused — no alerts evaluated")
+        self.assertFalse(ok)
+        post.assert_not_called()
+
+    def test_send_message_still_sends_a_stock_alert(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        n = self._notifier()
+        resp = MagicMock(status_code=200)
+        with patch("src.telegram_notifier.requests.post", return_value=resp) as post:
+            ok = n.send_message("🚀 LIVE BREAKOUT: RELIANCE — entry ₹2500")
+        self.assertTrue(ok, "a real stock alert must still be delivered")
+        self.assertTrue(post.called)
+
+    def test_publish_pause_never_sends_telegram(self) -> None:
+        """publish_pause must not touch the notifier at all, even if handed one."""
+        from unittest.mock import MagicMock
+
+        from src.run_visibility import publish_pause
+
+        notifier = MagicMock()
+        publish_pause("nse_breadth_paused", {"breadth50_pct": 34.7, "min_threshold_pct": 40.0},
+                      notifier=notifier, enabled=True)
+        notifier.send_message.assert_not_called()
+        notifier.send_photo.assert_not_called()
+
+    def test_publish_pause_reports_the_reason(self) -> None:
+        from src.run_visibility import publish_pause
+
+        desc = publish_pause("nse_breadth_paused",
+                             {"breadth50_pct": 34.7, "min_threshold_pct": 40.0})
+        self.assertIn("34.7%", desc)
+        self.assertIn("40.0%", desc)
+
+    def test_no_pause_config_switch_remains(self) -> None:
+        """There must be no way to re-enable pause notifications from config."""
+        cfg = load_config()
+        self.assertNotIn("notify_on_guard_pause", cfg["telegram"])
+        self.assertNotIn("pause_notice_repeat_hours", cfg["telegram"])
+        self.assertNotIn("pause_notice_min_delta_pct", cfg["telegram"])
+
+    def test_guard_notice_module_is_gone(self) -> None:
+        import importlib
+
+        with self.assertRaises(ModuleNotFoundError):
+            importlib.import_module("src.guard_notice")
+
+
+class TestNoOperationalTelegramInPausedRun(unittest.TestCase):
+    """
+    End-to-end: a paused Stage-1 run must send ZERO Telegram messages while
+    still refreshing the watchlist.
+    """
+
+    def test_paused_run_sends_nothing_to_telegram(self) -> None:
+        import sys
+        from pathlib import Path
+
+        import numpy as np
+        import pandas as pd
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_detector import _make_nifty_df, _make_synthetic_flag_df
+
+        import src.run_eod_scan as eod
+        import src.telegram_notifier as tn
+
+        df = _make_synthetic_flag_df(base_days=6, pole_days=2)
+        df.index = pd.bdate_range(end="2026-11-20", periods=len(df))
+        n = len(df)
+        declining = np.linspace(400, 200, n)
+        dud = pd.DataFrame(
+            {"Open": declining, "High": declining * 1.01, "Low": declining * 0.99,
+             "Close": declining, "Volume": np.full(n, 3e5)},
+            index=df.index,
+        )
+        universe = {"SETUP0": df, "DUD0": dud}
+        nifty = _make_nifty_df(df.index, ret20_pct=2.0, ret63_pct=6.0)
+
+        cfg = load_config()
+        cfg["regime"]["min_nifty_20d_return_pct"] = -99.0
+        cfg["regime"]["min_nse_breadth50_pct"] = 99.9     # trip the breadth guard
+        cfg["regime"]["min_breadth_universe"] = 1
+
+        # Record every outbound Telegram attempt
+        sent: list[str] = []
+        orig_msg = tn.TelegramNotifier.send_message
+        orig_photo = tn.TelegramNotifier.send_photo
+        tn.TelegramNotifier.send_message = lambda self, t, disable_preview=True: (
+            sent.append(t) or False
+        )
+        tn.TelegramNotifier.send_photo = lambda self, p, c: (sent.append(c) or False)
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                cfg["runtime"]["state_dir"] = str(td / "state")
+                cfg["runtime"]["charts_dir"] = str(td / "charts")
+                (td / "state").mkdir()
+                (td / "charts").mkdir()
+                cfg["universe"]["custom_watchlist_abs"] = str(td / "none.txt")
+                (td / "none.txt").write_text("", encoding="utf-8")
+
+                orig = (eod.fetch_daily_batch, eod.fetch_nifty_benchmark, eod.fetch_nse_universe)
+                eod.fetch_daily_batch = lambda symbols, **kw: {
+                    s: universe[s] for s in symbols if s in universe
+                }
+                eod.fetch_nifty_benchmark = lambda **kw: nifty
+                eod.fetch_nse_universe = lambda **kw: (list(universe), {s: s for s in universe})
+                try:
+                    summary = eod.run_eod_scan(
+                        cfg=cfg, force=True, limit=0, dry_run=False, no_live_refresh=True
+                    )
+                finally:
+                    eod.fetch_daily_batch, eod.fetch_nifty_benchmark, eod.fetch_nse_universe = orig
+
+                self.assertTrue(summary.get("alerts_paused"), "guard must trip")
+                self.assertGreaterEqual(summary.get("watchlist_count", 0), 1,
+                                        "watchlist must still be saved")
+                self.assertEqual(sent, [], f"a paused run must send nothing, got: {sent}")
+        finally:
+            tn.TelegramNotifier.send_message = orig_msg
+            tn.TelegramNotifier.send_photo = orig_photo

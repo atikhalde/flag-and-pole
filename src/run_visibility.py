@@ -57,30 +57,31 @@ def describe_pause(reason: str, info: Dict[str, Any]) -> str:
 def publish_pause(
     reason: str,
     info: Dict[str, Any],
-    notifier: Optional[Any] = None,
-    enabled: bool = True,
+    notifier: Optional[Any] = None,   # accepted for call-site compatibility; never used
+    enabled: bool = True,             # ignored: pauses are never sent to Telegram
 ) -> str:
     """
-    Record a pause in the job summary and (optionally) announce it on Telegram.
+    Record a guard pause for DEVELOPERS ONLY.
+
+    A pause is an internal operational state, not a trading signal. Telegram is
+    reserved strictly for stock alerts, so this never sends a message — it only
+    writes the GitHub Actions job summary and the log. (Earlier versions sent a
+    "Scanner paused" Telegram message, which spammed the channel every run.)
+
+    `notifier` and `enabled` are accepted so existing call sites keep working.
     Returns the description used.
     """
     desc = describe_pause(reason, info)
 
     body = (
-        f"⏸ **Scanner paused — no alerts were evaluated.**\n\n"
+        f"\u23f8 **Scanner paused — no alerts were evaluated.**\n\n"
         f"- Reason: {desc}\n"
         f"- Detail: `{info}`\n"
     )
-    write_job_summary("⏸ Scanner paused", body)
-
+    write_job_summary("\u23f8 Scanner paused", body)
     logger.warning("Scanner paused: %s", desc)
 
-    if enabled and notifier is not None:
-        try:
-            notifier.send_message(f"⏸ <b>Scanner paused</b>\n{desc}\n<i>No alerts were evaluated this run.</i>")
-        except Exception as exc:  # never let notification failure mask the pause
-            logger.warning("Could not send pause notice: %s", exc)
-
+    # Deliberately no Telegram send. Stock alerts only.
     return desc
 
 
