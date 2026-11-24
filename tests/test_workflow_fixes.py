@@ -407,3 +407,152 @@ class TestDetectionIndependentOfGuard(unittest.TestCase):
             self.assertTrue(state.get("alerts_paused"))
             self.assertEqual(state.get("pause_reason"), "nse_breadth_paused")
             self.assertGreaterEqual(len(state.get("candidates", [])), 1, "candidates must not be wiped")
+
+
+class TestGuardNoticeDedup(unittest.TestCase):
+    """
+    Regression: the guard-pause notice fired on EVERY run. With the scheduler
+    dispatching every 15 minutes, a multi-day weak-breadth stretch produced
+    dozens of identical Telegram messages.
+    """
+
+    def _gate(self, td, **kw):
+        from src.guard_notice import GuardNoticeGate
+
+        return GuardNoticeGate(td, **kw)
+
+    def test_first_notice_is_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            ok, why = self._gate(td).should_notify("nse_breadth_paused", {"breadth50_pct": 34.7})
+            self.assertTrue(ok)
+            self.assertIn("first", why)
+
+    def test_identical_repeat_is_suppressed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            now = now_ist()
+            info = {"breadth50_pct": 34.7, "min_threshold_pct": 40.0}
+            g = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
+            self.assertTrue(g.should_notify("nse_breadth_paused", info, now=now)[0])
+            g.mark_notified("nse_breadth_paused", info, now=now)
+            g.save()
+
+            # 30 more runs, 15 minutes apart, unchanged breadth
+            for i in range(1, 30):
+                g2 = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
+                ok, why = g2.should_notify(
+                    "nse_breadth_paused", info, now=now + timedelta(minutes=15 * i)
+                )
+                self.assertFalse(ok, f"run {i} should be suppressed, got: {why}")
+
+    def test_material_metric_change_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            now = now_ist()
+            g = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
+            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
+            g.save()
+
+            g2 = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
+            # 2.5 points worse -> new information, notify
+            ok, why = g2.should_notify(
+                "nse_breadth_paused", {"breadth50_pct": 32.2},
+                now=now + timedelta(minutes=15),
+            )
+            self.assertTrue(ok)
+            self.assertIn("moved", why)
+
+    def test_sub_threshold_change_stays_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            now = now_ist()
+            g = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
+            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
+            g.save()
+
+            g2 = self._gate(td, repeat_hours=20, min_delta_pct=1.0)
+            ok, _ = g2.should_notify(
+                "nse_breadth_paused", {"breadth50_pct": 34.9},
+                now=now + timedelta(minutes=15),
+            )
+            self.assertFalse(ok, "0.2pt drift must not re-notify")
+
+    def test_reason_change_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            now = now_ist()
+            g = self._gate(td)
+            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
+            g.save()
+
+            g2 = self._gate(td)
+            ok, why = g2.should_notify(
+                "nifty_regime_paused", {"ret20_pct": -5.0}, now=now + timedelta(minutes=15)
+            )
+            self.assertTrue(ok)
+            self.assertIn("changed", why)
+
+    def test_heartbeat_after_interval_notifies(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            now = now_ist()
+            g = self._gate(td, repeat_hours=20)
+            g.mark_notified("nse_breadth_paused", {"breadth50_pct": 34.7}, now=now)
+            g.save()
+
+            g2 = self._gate(td, repeat_hours=20)
+            ok, why = g2.should_notify(
+                "nse_breadth_paused", {"breadth50_pct": 34.7}, now=now + timedelta(hours=21)
+            )
+            self.assertTrue(ok, why)
+            self.assertIn("since last notice", why)
+
+    def test_corrupt_state_does_not_mute_the_scanner(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "guard_notice.json").write_text("{not json", encoding="utf-8")
+            ok, _ = self._gate(td).should_notify("nse_breadth_paused", {"breadth50_pct": 34.7})
+            self.assertTrue(ok, "unreadable gate state must fail open, not silent")
+
+
+class TestEodOncePerSession(unittest.TestCase):
+    """Regression: Stage-1 was re-scanning ~2,400 symbols every 15 minutes."""
+
+    def _state(self, td, **over):
+        p = Path(td) / "cc.json"
+        base = {
+            "scan_date": "2026-11-25",
+            "updated_at_ist": "2026-11-25 16:15:00 IST",
+            "dropped_incomplete_live_bar": False,
+        }
+        base.update(over)
+        p.write_text(json.dumps(base), encoding="utf-8")
+        return p
+
+    def test_skips_when_session_already_scanned(self) -> None:
+        from src.skip_scan import decide
+
+        with tempfile.TemporaryDirectory() as td:
+            p = self._state(td)
+            needed, why = decide(p, now=datetime(2026, 11, 25, 17, 0, tzinfo=IST))
+            self.assertFalse(needed, why)
+            self.assertIn("already done", why)
+
+    def test_waits_for_the_close_during_session(self) -> None:
+        from src.skip_scan import decide
+
+        with tempfile.TemporaryDirectory() as td:
+            p = self._state(td, scan_date="2026-11-24")
+            needed, why = decide(p, now=datetime(2026, 11, 25, 11, 0, tzinfo=IST))
+            self.assertFalse(needed, why)
+            self.assertIn("still open", why)
+
+    def test_proceeds_after_close_on_a_new_session(self) -> None:
+        from src.skip_scan import decide
+
+        with tempfile.TemporaryDirectory() as td:
+            p = self._state(td, scan_date="2026-11-24")
+            needed, why = decide(p, now=datetime(2026, 11, 25, 16, 0, tzinfo=IST))
+            self.assertTrue(needed, why)
+
+    def test_non_trading_day_skips(self) -> None:
+        from src.skip_scan import decide
+
+        with tempfile.TemporaryDirectory() as td:
+            p = self._state(td)
+            needed, why = decide(p, now=datetime(2026, 11, 28, 16, 0, tzinfo=IST))  # Saturday
+            self.assertFalse(needed, why)

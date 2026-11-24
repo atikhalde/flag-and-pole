@@ -134,6 +134,11 @@ telegram:
   # because every run still went green with no output. Now the scanner announces
   # the pause explicitly (and marks the GitHub job summary) so silence is never ambiguous.
   notify_on_guard_pause: true             # Send a Telegram line when a regime/breadth guard pauses the scan
+  # A pause is an ongoing STATE, not an event. Firing the notice on every run
+  # produced dozens of identical messages, so it is re-sent only when it carries
+  # new information (reason change, metric move, or this heartbeat).
+  pause_notice_repeat_hours: 20           # Re-send an unchanged pause notice at most this often
+  pause_notice_min_delta_pct: 1.0         # Re-send if breadth (or 20d return) moved by >= this many points
   tradingview_url_template: "https://www.tradingview.com/chart/?symbol=NSE%3A{symbol}"
 
 deduplication:

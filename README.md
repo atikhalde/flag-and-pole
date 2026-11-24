@@ -102,7 +102,40 @@ good `coiled_candidates.json` with an empty watchlist, committing it.
 fetched. Small `--limit` test runs are exempt. `python -m src.check_state` converts the soft abort into a
 non-zero exit so the Actions UI shows a failure rather than a false green.
 
-### 4. Verifying without network access
+### 4. Repeated pause notices (fixed)
+
+The guard-pause notice used to fire on **every** run. With the scheduler dispatching Stage-1 every
+15 minutes, a breadth reading stuck under 40% produced the same Telegram message dozens of times a
+day — which read as a bug, because it was one.
+
+Two independent fixes:
+
+**a) The notice is edge-triggered.** A pause is an ongoing *state*, not an event. `state/guard_notice.json`
+records the last notice, and it is re-sent only when it carries new information:
+
+| condition | behaviour |
+|---|---|
+| first pause, or reason changed | send immediately |
+| breadth / 20d return moved ≥ `pause_notice_min_delta_pct` (1.0) | send |
+| `pause_notice_repeat_hours` (20h) elapsed, still paused | send as a heartbeat |
+| otherwise | suppress (job summary says why) |
+
+Simulating 30 runs at 15-minute intervals with breadth hovering at ~34.7% now sends **1** message
+instead of 30. The gate state is committed back (`state/guard_notice.json`), because each CI run
+checks out a fresh tree — an uncommitted gate would forget and defeat itself.
+
+**b) Stage-1 no longer re-scans the universe every 15 minutes.** `src/skip_scan.py` gates the EOD
+scan to once per trading session:
+
+- a completed post-close scan for today already exists → skip
+- still inside the session (before 15:30 IST) → wait for the post-close scan
+- otherwise → proceed
+
+Scheduled runs are always allowed, so the settled close is never missed; the setting
+`STAGE1_ONCE_PER_SESSION=false` (repository variable) disables the gate if you want a scan per
+dispatch.
+
+### 5. Verifying without network access
 
 `scripts/dryrun.py` patches only the network boundary and runs the real detection, scoring, chart,
 ledger and PDF code against synthetic data:
@@ -115,7 +148,7 @@ python scripts/dryrun.py --quick    # skip the Stage-3 PDF build
 It is the fastest way to confirm a change did not break the pipeline when Yahoo/NSE are
 unreachable, and it is what caught the "tripped breadth guard still wipes the watchlist" bug.
 
-### 5. Repeat-alert policy
+### 6. Repeat-alert policy
 
 `deduplication.strict_never_repeat_symbol: true` together with `repeat_cooldown_days: 20` gives a
 **cooldown** policy: a symbol is suppressed for 20 days after alerting, then becomes eligible again for a
@@ -145,7 +178,7 @@ break all three workflows.
 ```bash
 pip install -r requirements.txt
 
-# 1. Run unit tests (43/43 covering all V2.1 gates, Breadth50, Option A Daily-Close SL, multi-bot, dedup, data-integrity & PDF)
+# 1. Run unit tests (54/54 covering all V2.1 gates, Breadth50, Option A Daily-Close SL, multi-bot, dedup, data-integrity & PDF)
 python -m unittest discover -s tests -v
 
 # 2. Validate V2.1 Core + Coil on BOROLTD (pre-breakout 13 Nov + live breakout 16 Nov)
