@@ -85,9 +85,9 @@ the day's watchlist **and** handed Stage-2 a `breadth_ok: false` which kept live
 after the market recovered.
 
 *Now:* Stage-1 always computes and persists the watchlist. The guard suppresses **alert dispatch only**,
-and the state record carries `alerts_paused` / `pause_reason`. A tripped guard is announced on Telegram
-(`telegram.notify_on_guard_pause`) and in the job summary, so "paused" can never be mistaken for
-"no setups found".
+and the state record carries `alerts_paused` / `pause_reason`. A tripped guard is recorded in the
+Actions job summary and the log, so "paused" can never be mistaken for "no setups found" — without
+posting anything to Telegram.
 
 Stage-2 additionally ignores a **stale** breadth flag (> 4 days old, tolerating a long weekend) and
 falls back to the fresh NIFTY 50 regime guard instead of staying muted forever.
@@ -102,29 +102,35 @@ good `coiled_candidates.json` with an empty watchlist, committing it.
 fetched. Small `--limit` test runs are exempt. `python -m src.check_state` converts the soft abort into a
 non-zero exit so the Actions UI shows a failure rather than a false green.
 
-### 4. Repeated pause notices (fixed)
+### 4. Telegram carries stock alerts only
 
-The guard-pause notice used to fire on **every** run. With the scheduler dispatching Stage-1 every
-15 minutes, a breadth reading stuck under 40% produced the same Telegram message dozens of times a
-day — which read as a bug, because it was one.
+A guard pause is an **operational state**, not a trading signal, so it is never sent to Telegram.
+It appears in the GitHub Actions job summary and the log, where it belongs.
 
-Two independent fixes:
+This replaced an earlier design that posted a `⏸ Scanner paused` message. Because the scheduler
+dispatched Stage-1 every 15 minutes and a sub-40% breadth reading can persist for days, that message
+repeated dozens of times a day. Deduplicating it was the wrong fix — the message should not have been
+sent at all.
 
-**a) The notice is edge-triggered.** A pause is an ongoing *state*, not an event. `state/guard_notice.json`
-records the last notice, and it is re-sent only when it carries new information:
+There are **three** enforcement points, so no future code path can leak a status message:
 
-| condition | behaviour |
+1. `publish_pause()` writes only to the job summary + log; it no longer takes a notifier.
+2. `TelegramNotifier._is_stock_alert()` hard-blocks any message or caption containing an operational
+   marker (`scanner paused`, `scanner aborted`, `no alerts were evaluated`, `scan paused`) — even if a
+   caller tries.
+3. There is no configuration switch to re-enable it.
+
+What still reaches Telegram:
+
+| message | sent? |
 |---|---|
-| first pause, or reason changed | send immediately |
-| breadth / 20d return moved ≥ `pause_notice_min_delta_pct` (1.0) | send |
-| `pause_notice_repeat_hours` (20h) elapsed, still paused | send as a heartbeat |
-| otherwise | suppress (job summary says why) |
+| Annotated chart + trade plan per stock setup | ✅ |
+| Live breakout / gap-and-go / spring trigger | ✅ |
+| EOD digest of new setups | ✅ |
+| Backtest PDF (manual Stage-3 run) | ✅ |
+| Guard pause / no-setups / data outage | ❌ job summary + logs only |
 
-Simulating 30 runs at 15-minute intervals with breadth hovering at ~34.7% now sends **1** message
-instead of 30. The gate state is committed back (`state/guard_notice.json`), because each CI run
-checks out a fresh tree — an uncommitted gate would forget and defeat itself.
-
-**b) Stage-1 no longer re-scans the universe every 15 minutes.** `src/skip_scan.py` gates the EOD
+**Stage-1 also no longer re-scans the universe every 15 minutes.** `src/skip_scan.py` gates the EOD
 scan to once per trading session:
 
 - a completed post-close scan for today already exists → skip

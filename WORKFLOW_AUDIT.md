@@ -355,7 +355,7 @@ DRY RUN: 19/19 checks passed
 
 ---
 
-## 4d. Fourth pass — the repeated pause notice
+## 4d. Fourth pass — status messages must never reach Telegram
 
 **Reported:** the same *"⏸ Scanner paused — NSE Breadth50 34.7% is below the 40.0% floor"* message
 arriving repeatedly.
@@ -368,20 +368,31 @@ arriving repeatedly.
    the same cadence — **19 Stage-1 runs and 19 Stage-2 runs in one day**, all `workflow_dispatch`.
    An EOD close scan once per session was being executed ~20x.
 
-**Fixes:**
+**First attempt (wrong):** deduplicate the notice with a persistent, edge-triggered gate
+(`src/guard_notice.py`, 20-hour heartbeat, committed state). It cut the volume to 1 message, but the
+premise was wrong — a guard pause is an **operational state**, not a trading signal, and should never
+have been sent to the channel at all.
 
-* `src/guard_notice.py` — persistent, edge-triggered gate. The notice re-sends only on a reason
-  change, a material metric move (`>= 1.0` point), or a 20-hour heartbeat. State lives in
-  `state/guard_notice.json` and is **committed**, because each CI run starts from a fresh checkout.
-* `src/skip_scan.py` + a workflow gate step — Stage-1 scans once per trading session. Scheduled runs
-  stay unconditional so the settled close is never missed.
+**Final fix:** Telegram carries stock alerts only.
 
-**Measured:** simulating 30 runs at 15-minute intervals with breadth hovering at ~34.7%:
+* `publish_pause()` no longer accepts or uses a notifier — job summary + log only.
+* `TelegramNotifier._is_stock_alert()` **hard-blocks** any message or caption containing an
+  operational marker (`scanner paused`, `scanner aborted`, `no alerts were evaluated`, `scan paused`)
+  before any HTTP call. This closes the whole class of bug, not just this one message.
+* `src/guard_notice.py`, its config switches and its workflow plumbing were **deleted** — there is no
+  switch to turn status messages back on.
+* `src/skip_scan.py` + a workflow gate step keep Stage-1 at once per trading session (scheduled runs
+  stay unconditional so the settled close is never missed).
+
+**Verified:**
 
 ```
-before: 30 identical Telegram messages
-after :  1 message        (run 0 only; runs 1-29 suppressed as "unchanged")
+guard tripped  -> 0 Telegram messages, watchlist still refreshed (1 candidate)
+valid setup    -> 2 Telegram messages (EOD digest + annotated stock chart)
 ```
+
+Tests assert the block happens *before* `requests.post` is called, that `publish_pause` cannot reach
+the notifier even when handed one, and that no config key can re-enable it.
 
 ---
 
@@ -390,7 +401,7 @@ after :  1 message        (run 0 only; runs 1-29 suppressed as "unchanged")
 | # | Action | Effort | Impact |
 |---|---|---|---|
 | 1 | Pin `requirements.txt` | 5 min | Prevents all three workflows breaking without warning |
-| 2 | Surface guard-pause state in Telegram / job summary | 20 min | Turns silent "green, no alerts" into an explicit signal |
+| 2 | Surface guard-pause state in the job summary (NOT Telegram) | 20 min | Turns silent "green, no alerts" into an explicit signal without spamming the channel |
 | 3 | Decide dedup policy (lifetime vs. cooldown window) | 30 min | Unblocks Stage 2 from being permanently muted |
 | 4 | Move candidate detection ahead of the breadth gate | 45 min | Keeps the watchlist fresh through weak-breadth stretches |
 | 5 | Abort instead of overwriting state on fetch failure | 20 min | Removes the silent-outage failure mode |
@@ -416,7 +427,7 @@ inspection:
 
 | Check | Result |
 |---|---|
-| Tests | **54 passed** (was 10) |
+| Tests | **57 passed** (was 10) |
 | pyflakes | clean |
 | All 5 CLI entry points `--help` | OK |
 | All 18 modules import | OK |
@@ -426,8 +437,11 @@ inspection:
 | Market closed → green build | `verify_exit=0` |
 | Outage → state preserved | byte-identical ✅ |
 | Offline end-to-end dry run | **16/16 checks** (`scripts/dryrun.py`) |
-| 30 paused runs → notices | **1** (was 30) |
+| Paused run → Telegram messages | **0** (was 1 per run) |
+| Valid setup → Telegram messages | **2** (digest + stock chart) |
 | Paused day keeps watchlist | 3 candidates preserved, 0 alerts |
 
-The single most important lesson from the second pass: **a fix that reports success without
-proving it is the same bug in a new costume.** The first abort fix looked correct and was not.
+Two lessons worth keeping: **a fix that reports success without proving it is the same bug in a new
+costume** (the first abort fix looked correct and was not), and **the right fix is sometimes deletion,
+not deduplication** (deduplicating the pause notice was clever and still wrong — the message should
+never have been sent).

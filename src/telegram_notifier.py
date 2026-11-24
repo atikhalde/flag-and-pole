@@ -50,7 +50,29 @@ class TelegramNotifier:
     def _tv_link(self, symbol: str) -> str:
         return self.tv_url_template.format(symbol=symbol)
 
+    # Status/operational phrases that must NEVER reach the Telegram channel.
+    # Telegram is reserved strictly for actionable STOCK alerts; operational
+    # notices (guard pauses, aborts, "no alerts today") belong in the Actions
+    # job summary and the logs only.
+    _BLOCKED_MARKERS = (
+        "scanner paused",
+        "scanner aborted",
+        "no alerts were evaluated",
+        "scan paused",
+    )
+
+    def _is_stock_alert(self, text_html: str) -> bool:
+        """False when the text is an operational notice rather than a stock alert."""
+        low = str(text_html or "").lower()
+        return not any(marker in low for marker in self._BLOCKED_MARKERS)
+
     def send_message(self, text_html: str, disable_preview: bool = True) -> bool:
+        if not self._is_stock_alert(text_html):
+            logger.warning(
+                "Blocked a non-stock (operational) Telegram message; "
+                "status notices belong in the job summary/logs only."
+            )
+            return False
         if not self.enabled:
             logger.info("[TELEGRAM DRY-RUN MESSAGE]\n%s", text_html)
             return False
@@ -69,6 +91,9 @@ class TelegramNotifier:
         return any_ok
 
     def send_photo(self, image_path: str | Path, caption_html: str) -> bool:
+        if not self._is_stock_alert(caption_html):
+            logger.warning("Blocked a non-stock (operational) Telegram photo caption.")
+            return False
         if not self.enabled:
             logger.info("[TELEGRAM DRY-RUN PHOTO: %s]\n%s", image_path, caption_html)
             return False
