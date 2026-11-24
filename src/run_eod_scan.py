@@ -26,6 +26,7 @@ import pandas as pd
 
 from src.alert_ledger import ledger_from_config
 from src.chart_generator import generate_pattern_chart
+from src.guard_notice import GuardNoticeGate
 from src.config_loader import load_config
 from src.data_fetcher import fetch_daily_batch, fetch_daily_single, fetch_nifty_benchmark
 from src.market_hours import is_nse_candle_incomplete_today, is_nse_trading_day, now_ist
@@ -323,6 +324,24 @@ def run_eod_scan(
     scan_date = matched[0][0].scan_date if matched else (regime.get("as_of") or now.strftime("%Y-%m-%d"))
     candidates_payload = [m[0].to_dict() for m in matched]
 
+    # Decide the pause-notice ONCE, before state is written, so the state file
+    # can record whether this run actually notified.
+    notice_sent = False
+    notice_reason_txt = ""
+    if pause_reason is not None:
+        _gate = GuardNoticeGate(
+            state_dir,
+            repeat_hours=float(t_cfg.get("pause_notice_repeat_hours", 20)),
+            min_delta_pct=float(t_cfg.get("pause_notice_min_delta_pct", 1.0)),
+        )
+        _should, notice_reason_txt = _gate.should_notify(pause_reason, pause_info, now=now)
+        _telegram_on = bool(t_cfg.get("notify_on_guard_pause", True))
+        notice_sent = bool(_should and _telegram_on and not dry_run)
+        if not dry_run:
+            if notice_sent:
+                _gate.mark_notified(pause_reason, pause_info, now=now)
+            _gate.save()
+
     state_obj = {
         "version": "V2.1 Core + Coil",
         "updated_at_ist": now.strftime("%Y-%m-%d %H:%M:%S IST"),
@@ -333,6 +352,8 @@ def run_eod_scan(
         "nse_breadth50": breadth_info,
         "alerts_paused": pause_reason is not None,
         "pause_reason": pause_reason,
+        "pause_notice_sent": notice_sent,
+        "pause_notice_decision": notice_reason_txt,
         "candidates": candidates_payload,
     }
     state_file.write_text(json.dumps(state_obj, indent=2), encoding="utf-8")
@@ -422,21 +443,34 @@ def run_eod_scan(
     if not dry_run:
         ledger.save()
 
-    # Make a paused guard visible instead of indistinguishable from "no setups".
+    # Make a paused guard visible — but only ONCE per meaningful change.
+    # A pause is a state, not an event: firing the notice on every run turned a
+    # multi-day weak-breadth stretch into dozens of identical Telegram messages.
     if pause_reason is not None:
         pause_desc = publish_pause(
             pause_reason,
             pause_info,
             notifier=notifier,
-            enabled=bool(t_cfg.get("notify_on_guard_pause", True)),
+            enabled=notice_sent,   # already gated above
         )
         write_job_summary(
             "Stage-1 EOD scan — watchlist refreshed, alerts paused",
             f"- {pause_desc}\n"
+            f"- Telegram notice: **{'sent' if notice_sent else 'suppressed'}** — {notice_reason_txt}\n"
             f"- **{len(candidates_payload)}** candidate(s) still saved to `state/coiled_candidates.json`\n"
             f"- Stage-2 live monitoring stays current and will resume the moment the guard clears\n",
         )
     else:
+        # Guard cleared: drop any stale pause marker so the NEXT pause notifies
+        # immediately instead of being suppressed by an old timestamp.
+        if not dry_run:
+            stale_gate = Path(state_dir) / "guard_notice.json"
+            if stale_gate.exists():
+                try:
+                    stale_gate.unlink()
+                    logger.info("Guard cleared — cleared previous pause-notice state.")
+                except OSError:
+                    pass
         write_job_summary(
             "Stage-1 EOD scan — complete",
             f"- Candidates: **{len(candidates_payload)}**\n"
@@ -467,6 +501,8 @@ def run_eod_scan(
         "nse_breadth50": breadth_info,
         "alerts_paused": pause_reason is not None,
         "pause_reason": pause_reason,
+        "pause_notice_sent": notice_sent,
+        "pause_notice_decision": notice_reason_txt,
         "watchlist_count": len(candidates_payload),
         "alert_count": len(alert_items),
         "newly_alerted": newly_alerted,

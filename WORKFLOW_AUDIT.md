@@ -355,6 +355,36 @@ DRY RUN: 19/19 checks passed
 
 ---
 
+## 4d. Fourth pass — the repeated pause notice
+
+**Reported:** the same *"⏸ Scanner paused — NSE Breadth50 34.7% is below the 40.0% floor"* message
+arriving repeatedly.
+
+**Root cause (two independent causes, both real):**
+
+1. **The notice was level-triggered.** `publish_pause` fired on every run that observed the tripped
+   guard. A breadth reading below 40% persists for days, so every run produced an identical message.
+2. **Stage-1 was being dispatched every 15 minutes.** The external scheduler fires *both* workflows on
+   the same cadence — **19 Stage-1 runs and 19 Stage-2 runs in one day**, all `workflow_dispatch`.
+   An EOD close scan once per session was being executed ~20x.
+
+**Fixes:**
+
+* `src/guard_notice.py` — persistent, edge-triggered gate. The notice re-sends only on a reason
+  change, a material metric move (`>= 1.0` point), or a 20-hour heartbeat. State lives in
+  `state/guard_notice.json` and is **committed**, because each CI run starts from a fresh checkout.
+* `src/skip_scan.py` + a workflow gate step — Stage-1 scans once per trading session. Scheduled runs
+  stay unconditional so the settled close is never missed.
+
+**Measured:** simulating 30 runs at 15-minute intervals with breadth hovering at ~34.7%:
+
+```
+before: 30 identical Telegram messages
+after :  1 message        (run 0 only; runs 1-29 suppressed as "unchanged")
+```
+
+---
+
 ## 5. Recommended priority
 
 | # | Action | Effort | Impact |
@@ -386,7 +416,7 @@ inspection:
 
 | Check | Result |
 |---|---|
-| Tests | **43 passed** (was 10) |
+| Tests | **54 passed** (was 10) |
 | pyflakes | clean |
 | All 5 CLI entry points `--help` | OK |
 | All 18 modules import | OK |
@@ -395,7 +425,8 @@ inspection:
 | Guard pause → green build | `verify_exit=0` |
 | Market closed → green build | `verify_exit=0` |
 | Outage → state preserved | byte-identical ✅ |
-| Offline end-to-end dry run | **19/19 checks** (`scripts/dryrun.py`) |
+| Offline end-to-end dry run | **16/16 checks** (`scripts/dryrun.py`) |
+| 30 paused runs → notices | **1** (was 30) |
 | Paused day keeps watchlist | 3 candidates preserved, 0 alerts |
 
 The single most important lesson from the second pass: **a fix that reports success without

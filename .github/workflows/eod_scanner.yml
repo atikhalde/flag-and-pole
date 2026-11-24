@@ -37,13 +37,33 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Decide whether an EOD scan is needed
+        # An external scheduler can dispatch Stage-1 far more often than an EOD
+        # scan needs (it was firing every 15 minutes). Re-scanning ~2,400 symbols
+        # and re-sending notices many times a day is pure waste and noise, so a
+        # completed EOD close is scanned once per trading session.
+        #   - cron runs are always allowed (guarantees the settled close is taken)
+        #   - manual runs are gated unless STAGE1_ONCE_PER_SESSION is set to false
+        id: gate
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Scheduled run — proceeding (post-close scan always allowed)."
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python -m src.skip_scan --check state/coiled_candidates.json
+
       - name: Run Stage-1 Full NSE Daily Flag Scan
+        if: ${{ steps.gate.outputs.needed == 'true' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_BOT_TOKEN_2: ${{ secrets.TELEGRAM_BOT_TOKEN_2 }}
           TELEGRAM_CHAT_ID_2: ${{ secrets.TELEGRAM_CHAT_ID_2 }}
           PYTHONPATH: ${{ github.workspace }}
+          STAGE1_ONCE_PER_SESSION: ${{ vars.STAGE1_ONCE_PER_SESSION || 'true' }}
         run: |
           mkdir -p output
           SUMMARY="output/scan_summary.json"
@@ -79,6 +99,9 @@ jobs:
           mkdir -p /tmp/gh_state_out
           [ -f state/coiled_candidates.json ] && cp state/coiled_candidates.json /tmp/gh_state_out/coiled_candidates.json
           [ -f state/sent_alerts.json ] && cp state/sent_alerts.json /tmp/gh_state_out/sent_alerts.json
+          # Dedup gate for guard-pause Telegram notices. Without this the notice
+          # repeats on every run, because each CI run checks out a fresh tree.
+          [ -f state/guard_notice.json ] && cp state/guard_notice.json /tmp/gh_state_out/guard_notice.json || true
 
           for attempt in 1 2 3; do
             git fetch origin "${{ github.ref_name }}"
@@ -89,6 +112,11 @@ jobs:
             fi
             if [ -f /tmp/gh_state_out/sent_alerts.json ]; then
               python -m src.alert_ledger --merge-into state/sent_alerts.json --from /tmp/gh_state_out/sent_alerts.json
+            fi
+            if [ -f /tmp/gh_state_out/guard_notice.json ]; then
+              cp /tmp/gh_state_out/guard_notice.json state/guard_notice.json
+            else
+              rm -f state/guard_notice.json
             fi
             # `git add` exits 128 if a pathspec is missing, which killed this
             # step (and failed the run) whenever a state file did not exist yet.
